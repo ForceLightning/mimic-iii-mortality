@@ -91,6 +91,14 @@ class EHRAndReportDataset(Dataset[tuple[Tensor, str, Tensor, str]]):
         return len(self.labels_df)
 
     def __getitem__(self, index) -> tuple[Tensor, str, Tensor, str]:
+        """Get sample at index.
+
+        Args:
+            index: Index of data sample.
+
+        Returns:
+            tuple[Tensor, str, Tensor, str]: Tuple of EHR tensor, report text in str format, label tensor, and stay ID.
+        """
         stay_id: str = self.stay_ids[index]  # pyright: ignore
 
         # Get report.
@@ -109,7 +117,7 @@ class EHRAndReportDataset(Dataset[tuple[Tensor, str, Tensor, str]]):
             .ffill()
         )
         ehr_tensor = torch.tensor(ehr_df.values, dtype=torch.float32)
-        label = torch.tensor(self.labels.iloc[index], dtype=torch.long)
+        label = torch.tensor(self.labels.iloc[index], dtype=torch.float32)
 
         return ehr_tensor, text, label, stay_id
 
@@ -471,7 +479,7 @@ class BioClinicalBERT(nn.Module):
 
     def forward(self, x_text: list[str], x_static: Tensor) -> Tensor:
         inputs = self.tokenizer(
-            x_text, return_tensors="pt", max_length=512, truncation=True
+            x_text, return_tensors="pt", max_length=512, truncation=True, padding=True
         ).to("cuda")
         outputs = self.model(**inputs)
 
@@ -487,7 +495,6 @@ class BioClinicalBERT(nn.Module):
             else x_static.mean(dim=1, keepdim=False)
         )
         # Concatenate BERT's output and the static features.
-        print("bert_output.shape, x_static.shape", bert_output.shape, x_static.shape)
         inputs = torch.cat([bert_output, x_static], dim=1)
 
         # Pass through 1st FC layer.

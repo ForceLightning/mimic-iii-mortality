@@ -1,7 +1,6 @@
 {
     "include": [
-        "./",
-        "thirdparty/libcpab"
+        "src"
     ],
     "exclude": [
         "**/__pycache__",

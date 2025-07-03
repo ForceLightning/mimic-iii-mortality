@@ -10,18 +10,6 @@ from argparse import ArgumentParser
 from typing import Literal
 
 # Third-Party
-from Model_n_Dataset import (
-    BioClinicalBERT,
-    CustomLSTM,
-    CustomRNN,
-    CustomTransformer,
-    EHRAndReportDataset,
-    EHRDataset,
-    Model_head_1_layer,
-    Model_head_3_layers,
-    Model_linear_1_layer,
-    ReportDataset,
-)
 from rich.progress import Progress
 
 # Scientific Libraries
@@ -35,6 +23,20 @@ from torch import GradScaler, Tensor, nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
+
+# First party imports
+from Model_n_Dataset import (
+    BioClinicalBERT,
+    CustomLSTM,
+    CustomRNN,
+    CustomTransformer,
+    EHRAndReportDataset,
+    EHRDataset,
+    Model_head_1_layer,
+    Model_head_3_layers,
+    Model_linear_1_layer,
+    ReportDataset,
+)
 
 SEED_CUS = 3407
 
@@ -442,32 +444,40 @@ def main(
             )
 
     model_sequential.to(DEVICE)
+    ckpt_path = os.path.join(model_path, f"{"_".join(model_name_list)}.ckpt")
 
-    params = [param for param in model_sequential.parameters() if param.requires_grad]
-    optimizer = torch.optim.Adam(params, lr=lr, betas=(0.5, 0.99), weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epoch)
+    if not os.path.exists(ckpt_path):
+        params = [
+            param for param in model_sequential.parameters() if param.requires_grad
+        ]
+        optimizer = torch.optim.Adam(
+            params, lr=lr, betas=(0.5, 0.99), weight_decay=1e-4
+        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=num_epoch
+        )
 
-    best_model = train_and_validate(
-        model_sequential,
-        train_loader,
-        test_loader,
-        model_type,
-        data_type,
-        num_epoch,
-        optimizer,
-        scheduler,
-        criterion,
-        result_path,
-    )
+        best_model = train_and_validate(
+            model_sequential,
+            train_loader,
+            test_loader,
+            model_type,
+            data_type,
+            num_epoch,
+            optimizer,
+            scheduler,
+            criterion,
+            result_path,
+        )
 
-    ### loading best model weights
-    model_sequential.load_state_dict(best_model)
-    ### saving trained model
-    print("...saving model...")
-    torch.save(
-        model_sequential.state_dict(),
-        os.path.join(model_path, f"{"_".join(model_name_list)}.ckpt"),
-    )
+        ### loading best model weights
+        model_sequential.load_state_dict(best_model)
+        ### saving trained model
+        print("...saving model...")
+        torch.save(model_sequential.state_dict(), ckpt_path)
+    else:
+        print(f"Loading model weights from {os.path.normpath(ckpt_path)}")
+        model_sequential.load_state_dict(torch.load(ckpt_path, weights_only=True))
 
     # define testing process after training completion and model saving
     gc.collect()
@@ -511,7 +521,7 @@ def main(
             count = count + 1
 
     ### print results
-    print(f"Testing accuracy is {100 * (count / label_test.size(dim=0))}%")
+    print(f"Testing accuracy is {100 * (count / label_test.size(dim=0)):0.2f}%")
 
     ### saving results
     df_test_acc = pd.DataFrame({"Testing Acc": [count / label_test.size(dim=0)]})
@@ -544,8 +554,8 @@ def main(
         else 0
     )  # Avoid division by zero
 
-    print(f"Precision/PPV: {precision:.2f}")
-    print(f"F1 score: {f1_score:.2f}")
+    print(f"Precision/PPV: {precision:.4f}")
+    print(f"F1 score: {f1_score:.4f}")
 
     ### saving results
     df_test_acc = pd.DataFrame({"Testing Pre": [precision]})

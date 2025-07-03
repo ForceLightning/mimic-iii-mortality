@@ -12,3 +12,6 @@ wheels/
 # Data and checkpoints dir
 data
 checkpoints
+
+# Env file
+.env

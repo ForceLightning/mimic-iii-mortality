@@ -22,7 +22,7 @@ from Model_n_Dataset import (
     Model_linear_1_layer,
     ReportDataset,
 )
-from rich.progress import Progress, track
+from rich.progress import Progress
 
 # Scientific Libraries
 import numpy as np
@@ -110,16 +110,18 @@ def train_epoch(
         scaler.step(optimizer)
         scaler.update()
 
-        current_loss = loss.item()
+        current_loss = loss.detach().cpu().item()
         epoch_loss += current_loss
 
         progress.console.print(f"Epoch: {epoch + 1}, Batch: {i}, Loss: {current_loss}")
         progress.advance(batch_task)
 
-    progress.update(batch_task, completed=True)
+    progress.stop_task(batch_task)
+    progress.remove_task(batch_task)
     return epoch_loss
 
 
+@torch.no_grad()
 def validate_epoch(
     model: nn.Module,
     test_loader: DataLoader,
@@ -161,17 +163,85 @@ def validate_epoch(
         progress.advance(batch_task)
 
         loss = criterion(output, label)
-        current_loss = loss.item()
+        current_loss = loss.detach().cpu().item()
         epoch_loss += current_loss
         progress.console.print(f"Epoch: {epoch + 1}, Batch: {i}, Loss: {current_loss}")
 
         output_test.append(output.detach().cpu())
         label_test.append(label.detach().cpu())
 
+    progress.stop_task(batch_task)
+    progress.remove_task(batch_task)
     output_test = torch.cat(output_test)
     label_test = torch.cat(label_test)
 
     return output_test, label_test
+
+
+@torch.no_grad()
+def test(
+    model: nn.Module,
+    test_loader: DataLoader,
+    model_type: str,
+    data_type: str,
+    model_path: str,
+    model_name_list: list[str],
+):
+    with Progress() as progress:
+        output_test = []
+        label_test = []
+
+        ### load best model
+        model.load_state_dict(
+            torch.load(os.path.join(model_path, f"{"_".join(model_name_list)}.ckpt"))
+        )
+        model.to(DEVICE)
+        model.eval()
+
+        ### testing
+        task = progress.add_task("Test batches", total=len(test_loader))
+        for i, data_tuple in enumerate(test_loader):
+            match (model_type, data_type):
+                case "RNN" | "LSTM" | "Transformer", "EHR" | "Report":
+                    data, label = data_tuple
+                    data = data.to(DEVICE)
+                    label = label.to(DEVICE).unsqueeze(1)
+
+                    output = model(data)
+                case "BioClinicalBERT", "EHRAndReport":
+                    ehr, report, label, _stay_id = data_tuple
+                    ehr = ehr.to(DEVICE)
+                    label = label.to(DEVICE).unsqueeze(1)
+
+                    output = model(report, ehr)
+                case _, _:
+                    raise NotImplementedError(
+                        f"Combination of {model_type}, {data_type} not implemented!"
+                    )
+
+            # append all outputs
+            output_test.append(output.detach().cpu())
+
+            # append all labels
+            label_test.append(label.detach().cpu())
+            progress.advance(task)
+
+        # create list for all outputs
+        output_test = torch.cat(output_test).detach().cpu()
+
+        # create list for all label
+        label_test = torch.cat(label_test).detach().cpu()
+
+        # calculate AUROC and AUPRC
+        auroc = roc_auc_score(label_test, output_test)
+        auprc = average_precision_score(label_test, output_test)
+
+        print(f"AUROC: {auroc:.4f}")
+        print(f"AUPRC: {auprc:.4f}")
+
+        progress.stop()
+
+    return output_test, label_test, auroc, auprc
 
 
 def train_and_validate(
@@ -193,7 +263,7 @@ def train_and_validate(
     scaler = GradScaler()  # Automatic Mixed Precision
 
     # training loop
-    with Progress() as progress:
+    with Progress(refresh_per_second=1, speed_estimate_period=30) as progress:
         epoch_task = progress.add_task("[green]Epochs", total=num_epochs)
         for epoch in range(num_epochs):
             # start training
@@ -236,10 +306,10 @@ def train_and_validate(
             )
             df_test_auroc.to_csv(result_path + "Testing_all_AUROC.csv", index=False)
             # print results
-            print(f"Testing AUROC is {100 * auroc}%")
+            progress.console.print(f"Testing AUROC is {100 * auroc}%")
             if auroc > best_auroc:
                 best_auroc = auroc
-                best_model = copy.deepcopy(model.cpu().state_dict())
+                best_model = copy.deepcopy(model.state_dict())
             progress.advance(epoch_task)
 
     return best_model
@@ -285,7 +355,6 @@ def main(
         batch_size=batch_size,
         shuffle=True,
         num_workers=8,
-        pin_memory=True,
         persistent_workers=True,
     )
     test_loader = DataLoader(
@@ -293,13 +362,12 @@ def main(
         batch_size=batch_size,
         shuffle=False,
         num_workers=8,
-        pin_memory=True,
         persistent_workers=True,
     )
 
     ### model saving
     # change path accroding to the model structure (Encoder/Discriminator/Scheduler) and data (partial or full)
-    model_path = f"{checkpoints_dir}/Dataset_{str(data_type)}_Model_{str(model_type)}_epoch_{str(num_epoch)}_CosLR_lr_{str(lr)}_seed{str(SEED_CUS)}/"
+    model_path = f"{checkpoints_dir}/Dataset_{str(data_type)}_Model_{str(model_type)}{"_tcn" if bert_use_temporal_conv else ""}_epoch_{str(num_epoch)}_CosLR_lr_{str(lr)}_seed{str(SEED_CUS)}/"
     if not os.path.exists(model_path):
         # Create a new directory because it does not exist
         os.makedirs(model_path)
@@ -307,7 +375,7 @@ def main(
 
     ### result saving
     # change path accroding to the model structure (Encoder/Discriminator/Scheduler) and data (partial or full)
-    result_path = f"{checkpoints_dir}/Dataset_{str(data_type)}_Model_{str(model_type)}_epoch_{str(num_epoch)}_CosLR_lr_{str(lr)}_seed{str(SEED_CUS)}/"
+    result_path = f"{checkpoints_dir}/Dataset_{str(data_type)}_Model_{str(model_type)}{"_tcn" if bert_use_temporal_conv else ""}_epoch_{str(num_epoch)}_CosLR_lr_{str(lr)}_seed{str(SEED_CUS)}/"
     if not os.path.exists(result_path):
         # Create a new directory because it does not exist
         os.makedirs(result_path)
@@ -404,55 +472,15 @@ def main(
     # define testing process after training completion and model saving
     gc.collect()
     print("start final testing")
-    count = 0
-    output_test = []
-    label_test = []
 
-    ### load best model
-    model_sequential.load_state_dict(
-        torch.load(os.path.join(model_path, f"{"_".join(model_name_list)}.ckpt"))
+    output_test, label_test, auroc, auprc = test(
+        model_sequential,
+        test_loader,
+        model_type,
+        data_type,
+        model_path,
+        model_name_list,
     )
-    model_sequential.to(DEVICE)
-    model_sequential.eval()
-
-    ### testing
-    for i, data_tuple in track(enumerate(test_loader), "Test batches"):
-        match (model_type, data_type):
-            case "RNN" | "LSTM" | "Transformer", "EHR" | "Report":
-                data, label = data_tuple
-                data = data.to(DEVICE)
-                label = label.to(DEVICE).unsqueeze(1)
-
-                output = model_sequential(data)
-            case "BioClinicalBERT", "EHRAndReport":
-                ehr, report, label, _stay_id = data_tuple
-                ehr = ehr.to(DEVICE)
-                label = label.to(DEVICE).unsqueeze(1)
-
-                output = model_sequential(report, ehr)
-            case _, _:
-                raise NotImplementedError(
-                    f"Combination of {model_type}, {data_type} not implemented!"
-                )
-
-        # append all outputs
-        output_test.append(output.detach().cpu())
-
-        # append all labels
-        label_test.append(label.detach().cpu())
-
-    # create list for all outputs
-    output_test = torch.cat(output_test)
-
-    # create list for all label
-    label_test = torch.cat(label_test)
-
-    # calculate AUROC and AUPRC
-    auroc = roc_auc_score(label_test, output_test)
-    auprc = average_precision_score(label_test, output_test)
-
-    print(f"AUROC: {auroc:.4f}")
-    print(f"AUPRC: {auprc:.4f}")
 
     ### saving results
     df_test_acc = pd.DataFrame({"Testing AUROC": [auroc]})
@@ -477,6 +505,7 @@ def main(
     ).int()  # values > 0.1 → 1, else → 0
 
     # calculate accuracy
+    count = 0
     for i in range(label_test.size(dim=0)):
         if output_thresholded[i] == label_test[i]:
             count = count + 1
@@ -492,19 +521,19 @@ def main(
     TP = (
         (label_test == 1) & (output_thresholded == 1)
     ).sum()  # Both label and prediction are 1
-    print(TP)
+    print(f"TP: {TP}")
     FN = (
         (label_test == 1) & (output_thresholded == 0)
     ).sum()  # Label is 1, prediction is 0
-    print(FN)
+    print(f"FN: {FN}")
     FP = (
         (label_test == 0) & (output_thresholded == 1)
     ).sum()  # Label is 0, prediction is 1
-    print(FP)
+    print(f"FP: {FP}")
     TN = (
         (label_test == 0) & (output_thresholded == 0)
     ).sum()  # Both label and prediction are 0
-    print(TN)
+    print(f"TN: {TN}")
 
     # Calculate Precision/PPV
     precision = TP / (TP + FP) if (TP + FP) != 0 else 0  # Avoid division by zero

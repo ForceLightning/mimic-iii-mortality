@@ -5,9 +5,12 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "gensim>=4.3.3",
+    "matplotlib>=3.10.3",
     "pandas>=2.3.0",
     "rich>=14.0.0",
     "scikit-learn>=1.7.0",
+    "seaborn>=0.13.2",
     "torch",
     "torchvision",
     "transformers>=4.53.0",
@@ -24,4 +27,9 @@ torch = [
 ]
 torchvision = [
   { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[dependency-groups]
+wsl = [
+    "pyqt6>=6.9.1",
 ]

@@ -10,11 +10,13 @@ from argparse import ArgumentParser
 from typing import Literal
 
 # Third-Party
+from rich.console import Console
 from rich.progress import Progress
 
 # Scientific Libraries
 import numpy as np
 import pandas as pd
+from matplotlib import pyplot as plt
 from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
 
 # PyTorch
@@ -37,8 +39,10 @@ from Model_n_Dataset import (
     Model_linear_1_layer,
     ReportDataset,
 )
+from utils.roc import auc_charts
 
 SEED_CUS = 3407
+CONSOLE = Console()
 
 
 def set_seed(seed_cus):
@@ -202,7 +206,7 @@ def test(
 
         ### testing
         task = progress.add_task("Test batches", total=len(test_loader))
-        for i, data_tuple in enumerate(test_loader):
+        for data_tuple in test_loader:
             match (model_type, data_type):
                 case "RNN" | "LSTM" | "Transformer", "EHR" | "Report":
                     data, label = data_tuple
@@ -215,7 +219,8 @@ def test(
                     ehr = ehr.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
 
-                    output = model(report, ehr)
+                    assert isinstance(model, BioClinicalBERT)
+                    output = model.predict(report, ehr)
                 case _, _:
                     raise NotImplementedError(
                         f"Combination of {model_type}, {data_type} not implemented!"
@@ -238,8 +243,8 @@ def test(
         auroc = roc_auc_score(label_test, output_test)
         auprc = average_precision_score(label_test, output_test)
 
-        print(f"AUROC: {auroc:.4f}")
-        print(f"AUPRC: {auprc:.4f}")
+        progress.console.print(f"AUROC: {auroc:.4f}")
+        progress.console.print(f"AUPRC: {auprc:.4f}")
 
         progress.stop()
 
@@ -373,7 +378,9 @@ def main(
     if not os.path.exists(model_path):
         # Create a new directory because it does not exist
         os.makedirs(model_path)
-        print("The new model directory is created!")
+        CONSOLE.print(
+            f"The new model directory is created: {os.path.normpath(model_path)}"
+        )
 
     ### result saving
     # change path accroding to the model structure (Encoder/Discriminator/Scheduler) and data (partial or full)
@@ -381,7 +388,9 @@ def main(
     if not os.path.exists(result_path):
         # Create a new directory because it does not exist
         os.makedirs(result_path)
-        print("The new result directory is created!")
+        CONSOLE.print(
+            f"The new result directory is created: {os.path.normpath(result_path)}"
+        )
 
     # set criterion
     criterion = nn.BCEWithLogitsLoss()
@@ -473,15 +482,15 @@ def main(
         ### loading best model weights
         model_sequential.load_state_dict(best_model)
         ### saving trained model
-        print("...saving model...")
+        CONSOLE.print("...saving model...")
         torch.save(model_sequential.state_dict(), ckpt_path)
     else:
-        print(f"Loading model weights from {os.path.normpath(ckpt_path)}")
+        CONSOLE.print(f"Loading model weights from {os.path.normpath(ckpt_path)}")
         model_sequential.load_state_dict(torch.load(ckpt_path, weights_only=True))
 
     # define testing process after training completion and model saving
     gc.collect()
-    print("start final testing")
+    CONSOLE.print("start final testing")
 
     output_test, label_test, auroc, auprc = test(
         model_sequential,
@@ -506,7 +515,7 @@ def main(
     j_scores = tpr - fpr
     j_max_idx = j_scores.argmax()
     best_threshold = thresholds[j_max_idx]
-    print(f"Best threshold: {best_threshold}")
+    CONSOLE.print(f"Best threshold: {best_threshold}")
 
     # apply threshold on output to calculate following metrics
     # this one needs to be adjusted, regarding the thres value, based on the AUROC maybe?
@@ -521,7 +530,7 @@ def main(
             count = count + 1
 
     ### print results
-    print(f"Testing accuracy is {100 * (count / label_test.size(dim=0)):0.2f}%")
+    CONSOLE.print(f"Testing accuracy is {100 * (count / label_test.size(dim=0)):0.2f}%")
 
     ### saving results
     df_test_acc = pd.DataFrame({"Testing Acc": [count / label_test.size(dim=0)]})
@@ -531,19 +540,19 @@ def main(
     TP = (
         (label_test == 1) & (output_thresholded == 1)
     ).sum()  # Both label and prediction are 1
-    print(f"TP: {TP}")
+    CONSOLE.print(f"TP: {TP}")
     FN = (
         (label_test == 1) & (output_thresholded == 0)
     ).sum()  # Label is 1, prediction is 0
-    print(f"FN: {FN}")
+    CONSOLE.print(f"FN: {FN}")
     FP = (
         (label_test == 0) & (output_thresholded == 1)
     ).sum()  # Label is 0, prediction is 1
-    print(f"FP: {FP}")
+    CONSOLE.print(f"FP: {FP}")
     TN = (
         (label_test == 0) & (output_thresholded == 0)
     ).sum()  # Both label and prediction are 0
-    print(f"TN: {TN}")
+    CONSOLE.print(f"TN: {TN}")
 
     # Calculate Precision/PPV
     precision = TP / (TP + FP) if (TP + FP) != 0 else 0  # Avoid division by zero
@@ -554,12 +563,20 @@ def main(
         else 0
     )  # Avoid division by zero
 
-    print(f"Precision/PPV: {precision:.4f}")
-    print(f"F1 score: {f1_score:.4f}")
+    CONSOLE.print(f"Precision/PPV: {precision:.4f}")
+    CONSOLE.print(f"F1 score: {f1_score:.4f}")
 
     ### saving results
     df_test_acc = pd.DataFrame({"Testing Pre": [precision]})
     df_test_acc.to_csv(result_path + "Testing_best_Pre.csv", index=False)
+
+    model_str = model_type if not bert_use_temporal_conv else model_type + "_TCN"
+    model_str = model_str + f"_seed{SEED_CUS}"
+
+    fig = auc_charts(label_test, output_test, model_str)
+    fig.savefig(
+        f"./output/{model_str}.png",
+    )
 
 
 if __name__ == "__main__":

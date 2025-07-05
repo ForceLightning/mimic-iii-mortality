@@ -1,5 +1,6 @@
 # Standard Library
 import os
+from typing import override
 
 # Scientific Libraries
 import pandas as pd
@@ -175,7 +176,8 @@ class CustomRNN(nn.Module):
         self.weight_ya = nn.Parameter(torch.randn(input_size, hidden_size))
         self.bias_y = nn.Parameter(torch.zeros(input_size))
 
-    def forward(self, data):
+    @override
+    def forward(self, data: Tensor) -> Tensor:
         for layer_num in range(self.num_layers):
             # Set initial hidden state to zero
             hidden_state = torch.zeros(
@@ -203,6 +205,11 @@ class CustomRNN(nn.Module):
             data = torch.stack(outputs, dim=1)  # [B, T, F]
         result = data[:, -1, :]
         return result
+
+    @torch.no_grad()
+    def predict(self, data: Tensor) -> Tensor:
+        result = self.forward(data)
+        return result.sigmoid()
 
 
 # define LSTM class
@@ -299,7 +306,8 @@ class CustomLSTM(nn.Module):
         self.weight_ya = nn.Parameter(torch.randn(input_size, hidden_size))
         self.bias_y = nn.Parameter(torch.zeros(input_size))
 
-    def forward(self, data):
+    @override
+    def forward(self, data: Tensor) -> Tensor:
         for layer_num in range(self.num_layers):
             # Set initial hidden state and cell state to zero
             hidden_state = torch.zeros(
@@ -351,6 +359,11 @@ class CustomLSTM(nn.Module):
         result = data[:, -1, :]
         return result
 
+    @torch.no_grad()
+    def predict(self, data: Tensor) -> Tensor:
+        result = self.forward(data)
+        return result.sigmoid()
+
 
 # Transformer block
 class CustomTransformerBlock(nn.Module):
@@ -371,7 +384,8 @@ class CustomTransformerBlock(nn.Module):
 
         self.dropout = nn.Dropout(Trans_dropout)
 
-    def forward(self, data):
+    @override
+    def forward(self, data: Tensor) -> Tensor:
         output_sa = self.self_attn(data, data, data)[0]
         output_sa_norm = self.norm_1(data + self.dropout(output_sa))
 
@@ -410,7 +424,8 @@ class CustomTransformer(nn.Module):
             ]
         )
 
-    def forward(self, data):
+    @override
+    def forward(self, data: Tensor) -> Tensor:
         batch_size, seq_len, _ = data.shape
 
         # Add CLS tokens
@@ -425,6 +440,11 @@ class CustomTransformer(nn.Module):
             result = block(result)
 
         return result[:, 0, :]  # CLS tokens
+
+    @torch.no_grad()
+    def predict(self, data: Tensor) -> Tensor:
+        result = self.forward(data)
+        return result.sigmoid()
 
 
 class BioClinicalBERT(nn.Module):
@@ -511,6 +531,11 @@ class BioClinicalBERT(nn.Module):
         out = self.classifier(out_2)
 
         return out
+
+    @torch.no_grad()
+    def predict(self, x_test: list[str], x_static: Tensor) -> Tensor:
+        out = self.forward(x_test, x_static)
+        return out.sigmoid()
 
 
 # define 3 linear layers model

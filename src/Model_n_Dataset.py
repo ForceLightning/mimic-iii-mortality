@@ -1,6 +1,6 @@
 # Standard Library
 import os
-from typing import override
+from typing import Literal, override
 
 # Scientific Libraries
 import pandas as pd
@@ -45,7 +45,7 @@ class EHRDataset(Dataset[tuple[Tensor, Tensor]]):
 
 
 # define and create dataset (using processed EHR from MIMIC III data)
-class ReportDataset(Dataset[str]):
+class ReportDataset(Dataset[tuple[str, Tensor]]):
     def __init__(self, root_dir):
         self.report_dir = os.path.join(root_dir, "Report/")
         label_path = os.path.join(root_dir, "labels.csv")
@@ -57,20 +57,19 @@ class ReportDataset(Dataset[str]):
     def __len__(self):
         return len(self.labels_df)
 
-    def __getitem__(self, idx: int) -> str:
-        stay_id = self.stay_ids[idx]
+    def __getitem__(self, index: int) -> tuple[str, Tensor]:
+        stay_id = self.stay_ids[index]
 
         report_path = os.path.join(self.report_dir, f"{stay_id}")
         report_df = pd.read_csv(report_path, index_col=False, encoding="utf-8").ffill()
-
-        # Convert to tensors
-        # report_tensor = torch.tensor(report_df.values, dtype=torch.float32)
-        # label = torch.tensor(self.labels.iloc[idx], dtype=torch.float)
         reports = report_df["Note"].drop_duplicates().to_list()
         reports = self.__remove_spaces_from_report(reports)
         reports = " [SEP] ".join(reports)
         text = "[CLS] " + reports
-        return text
+
+        label = torch.tensor(self.labels.iloc[index], dtype=torch.float32)
+
+        return text, label
 
     def __remove_spaces_from_report(self, reports: list[str]) -> list[str]:
         reports = list(map(lambda x: x[::2], reports))
@@ -447,7 +446,62 @@ class CustomTransformer(nn.Module):
         return result.sigmoid()
 
 
-class BioClinicalBERT(nn.Module):
+class BERT(nn.Module):
+    def __init__(
+        self,
+        model_name: Literal[
+            "google-bert/bert-base-uncased",
+            "dmis-lab/biobert-v1.1",
+            "emilyalsentzer/Bio_ClinicalBERT",
+        ],
+        dropout_p: float = 0.5,
+        n_fc_1: int = 256,
+        n_fc_2: int = 48,
+    ) -> None:
+        super().__init__()
+        self.tokenizer: BertTokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model: BertModel = AutoModel.from_pretrained(model_name)
+        self.dropout = nn.Dropout(p=dropout_p)
+
+        # Batch-norm
+        self.batchnorm_1 = nn.BatchNorm1d(n_fc_1, momentum=0.1)
+        self.batchnorm_2 = nn.BatchNorm1d(n_fc_2, momentum=0.1)
+
+        # Define the FC layers
+        self.linear_1 = nn.Linear(self.model.config.hidden_size, n_fc_1)
+        self.relu = nn.ReLU()
+        self.linear_2 = nn.Linear(n_fc_1, n_fc_2)
+        self.classifier = nn.Linear(n_fc_2, 1)
+
+    def forward(self, x_text: list[str]) -> Tensor:
+        inputs = self.tokenizer(
+            x_text, return_tensors="pt", max_length=512, truncation=True, padding=True
+        ).to("cuda")
+        outputs = self.model(**inputs)
+        bert_output = outputs[0][:, 0, :]
+
+        # Pass through 1st FC layer.
+        out_1 = self.relu(self.linear_1(bert_output))
+        out_1 = self.batchnorm_1(out_1)
+        out_1 = self.dropout(out_1)
+
+        # Pass through 2nd FC layer.
+        out_2 = self.relu(self.linear_2(out_1))
+        out_2 = self.batchnorm_2(out_2)
+        out_2 = self.dropout(out_2)
+
+        # Pass through classifier output layer.
+        out = self.classifier(out_2)
+
+        return out
+
+    @torch.no_grad()
+    def predict(self, x_text: list[str]) -> Tensor:
+        out = self.forward(x_text)
+        return out.sigmoid()
+
+
+class BERT_EHR(nn.Module):
     def __init__(
         self,
         static_size: int = 76,
@@ -575,7 +629,7 @@ if __name__ == "__main__":
     dataset = EHRAndReportDataset("./data/train_with_raw_report/")
     dataloader = DataLoader(dataset, batch_size=2)
 
-    model = BioClinicalBERT().cuda()
+    model = BERT_EHR().cuda()
 
     for ehr, report, label, stay_id in dataloader:
         ehr, label = ehr.cuda(), label.cuda()

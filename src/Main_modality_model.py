@@ -1,10 +1,7 @@
-# import functions
 # Standard Library
 import copy
 import gc
 import os
-
-# define fixed seed
 import random
 from argparse import ArgumentParser
 from typing import Literal
@@ -28,7 +25,8 @@ from torch.utils.data import DataLoader
 
 # First party imports
 from Model_n_Dataset import (
-    BioClinicalBERT,
+    BERT,
+    BERT_EHR,
     CustomLSTM,
     CustomRNN,
     CustomTransformer,
@@ -93,13 +91,14 @@ def train_epoch(
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             match (model_type, data_type):
-                case "RNN" | "LSTM" | "Transformer", "EHR" | "Report":
+                case "RNN" | "LSTM" | "Transformer" | "BERT", "EHR" | "Report":
                     data, label = data_tuple
-                    data = data.to(DEVICE)
+                    if isinstance(data, Tensor):
+                        data = data.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
 
                     output = model(data)
-                case "BioClinicalBERT", "EHRAndReport":
+                case "BERT_EHR", "EHRAndReport":
                     ehr, report, label, _stay_id = data_tuple
                     ehr = ehr.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
@@ -150,13 +149,14 @@ def validate_epoch(
     progress.console.print("start testing")
     for i, data_tuple in enumerate(test_loader):
         match (model_type, data_type):
-            case "RNN" | "LSTM" | "Transformer", "EHR" | "Report":
+            case "RNN" | "LSTM" | "Transformer" | "BERT", "EHR" | "Report":
                 data, label = data_tuple
-                data = data.to(DEVICE)
+                if isinstance(data, Tensor):
+                    data = data.to(DEVICE)
                 label = label.to(DEVICE).unsqueeze(1)
 
                 output = model(data)
-            case "BioClinicalBERT", "EHRAndReport":
+            case "BERT_EHR", "EHRAndReport":
                 ehr, report, label, _stay_id = data_tuple
                 ehr = ehr.to(DEVICE)
                 label = label.to(DEVICE).unsqueeze(1)
@@ -208,18 +208,19 @@ def test(
         task = progress.add_task("Test batches", total=len(test_loader))
         for data_tuple in test_loader:
             match (model_type, data_type):
-                case "RNN" | "LSTM" | "Transformer", "EHR" | "Report":
+                case "RNN" | "LSTM" | "Transformer" | "BERT", "EHR" | "Report":
                     data, label = data_tuple
-                    data = data.to(DEVICE)
+                    if isinstance(data, Tensor):
+                        data = data.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
 
                     output = model(data)
-                case "BioClinicalBERT", "EHRAndReport":
+                case "BERT_EHR", "EHRAndReport":
                     ehr, report, label, _stay_id = data_tuple
                     ehr = ehr.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
 
-                    assert isinstance(model, BioClinicalBERT)
+                    assert isinstance(model, BERT_EHR)
                     output = model.predict(report, ehr)
                 case _, _:
                     raise NotImplementedError(
@@ -311,7 +312,9 @@ def train_and_validate(
             df_test_auroc = pd.DataFrame(
                 {"Epoch": epoch_all, "Testing AUROC": auroc_all}
             )
-            df_test_auroc.to_csv(result_path + "Testing_all_AUROC.csv", index=False)
+            df_test_auroc.to_csv(
+                os.path.join(result_path, "Testing_all_AUROC.csv"), index=False
+            )
             # print results
             progress.console.print(f"Testing AUROC is {100 * auroc}%")
             if auroc > best_auroc:
@@ -323,7 +326,7 @@ def train_and_validate(
 
 
 def main(
-    model_type: Literal["RNN", "LSTM", "Transformer", "BioClinicalBERT"],
+    model_type: Literal["RNN", "LSTM", "Transformer", "BERT", "BERT_EHR"],
     data_type: Literal["EHR", "Report", "EHRAndReport"],
     data_dir: str = DATA_DIR,
     checkpoints_dir: str = CHECKPOINTS_DIR,
@@ -342,8 +345,14 @@ def main(
     output_l2_dim: int = 128,
     output_l3_dim: int = 1,
     bert_use_temporal_conv: bool = False,
+    bert_model_str: Literal[
+        "google-bert/bert-base-uncased",
+        "dmis-lab/biobert-v1.1",
+        "emilyalsentzer/Bio_ClinicalBERT",
+    ] = "google-bert/bert-base-uncased",
+    seed_everything: int = SEED_CUS,
 ):
-    set_seed(SEED_CUS)
+    set_seed(seed_everything)
     # define train and test dataset
     if data_type == "EHR":
         Dataset = EHRDataset
@@ -374,7 +383,13 @@ def main(
 
     ### model saving
     # change path accroding to the model structure (Encoder/Discriminator/Scheduler) and data (partial or full)
-    model_path = f"{checkpoints_dir}/Dataset_{str(data_type)}_Model_{str(model_type)}{"_tcn" if bert_use_temporal_conv else ""}_epoch_{str(num_epoch)}_CosLR_lr_{str(lr)}_seed{str(SEED_CUS)}/"
+    model_type_detailed = model_type
+    if "BERT" in model_type:
+        model_type_detailed = bert_model_str.split("/")[1]
+    model_path = os.path.join(
+        f"{checkpoints_dir}/Dataset_{str(data_type)}_Model_{model_type}{"_tcn" if bert_use_temporal_conv else ""}_epoch_{str(num_epoch)}_CosLR_lr_{str(lr)}_seed{str(seed_everything)}/",
+        model_type_detailed,
+    )
     if not os.path.exists(model_path):
         # Create a new directory because it does not exist
         os.makedirs(model_path)
@@ -384,7 +399,10 @@ def main(
 
     ### result saving
     # change path accroding to the model structure (Encoder/Discriminator/Scheduler) and data (partial or full)
-    result_path = f"{checkpoints_dir}/Dataset_{str(data_type)}_Model_{str(model_type)}{"_tcn" if bert_use_temporal_conv else ""}_epoch_{str(num_epoch)}_CosLR_lr_{str(lr)}_seed{str(SEED_CUS)}/"
+    result_path = os.path.join(
+        f"{checkpoints_dir}/Dataset_{str(data_type)}_Model_{model_type}{"_tcn" if bert_use_temporal_conv else ""}_epoch_{str(num_epoch)}_CosLR_lr_{str(lr)}_seed{str(seed_everything)}/",
+        model_type_detailed,
+    )
     if not os.path.exists(result_path):
         # Create a new directory because it does not exist
         os.makedirs(result_path)
@@ -437,8 +455,16 @@ def main(
                 Model_head_1_layer(trans_input_dim, output_l3_dim),
             )
             model_name_list = ["Model_linear", "Model_Transformer", "Model_head_linear"]
-        case "BioClinicalBERT", EHRAndReportDataset():
-            model_sequential = BioClinicalBERT(
+        case "BERT", ReportDataset():
+            model_sequential = BERT(
+                bert_model_str,
+                trans_dropout,
+                output_l1_dim,
+                output_l2_dim,
+            )
+            model_name_list = [model_type_detailed]
+        case "BERT_EHR", EHRAndReportDataset():
+            model_sequential = BERT_EHR(
                 train_dataset[0][0].shape[-1],
                 trans_dropout,
                 output_l1_dim,
@@ -446,7 +472,7 @@ def main(
                 bert_use_temporal_conv,
             )
 
-            model_name_list = ["BioClinicalBERT"]
+            model_name_list = [model_type_detailed]
         case _, _:
             raise NotImplementedError(
                 f"Combination of {model_type}, {data_type} is not implemented!"
@@ -503,11 +529,11 @@ def main(
 
     ### saving results
     df_test_acc = pd.DataFrame({"Testing AUROC": [auroc]})
-    df_test_acc.to_csv(result_path + "Testing_best_AUROC.csv", index=False)
+    df_test_acc.to_csv(os.path.join(result_path, "Testing_best_AUROC.csv"), index=False)
 
     ### saving results
     df_test_acc = pd.DataFrame({"Testing AUPRC": [auprc]})
-    df_test_acc.to_csv(result_path + "Testing_best_AUPRC.csv", index=False)
+    df_test_acc.to_csv(os.path.join(result_path, "Testing_best_AUPRC.csv"), index=False)
 
     # To find the cut-off (threshold) value that gives the best classification performance from an AUROC
     fpr, tpr, thresholds = roc_curve(label_test, output_test)
@@ -534,7 +560,7 @@ def main(
 
     ### saving results
     df_test_acc = pd.DataFrame({"Testing Acc": [count / label_test.size(dim=0)]})
-    df_test_acc.to_csv(result_path + "Testing_best_Acc.csv", index=False)
+    df_test_acc.to_csv(os.path.join(result_path, "Testing_best_Acc.csv"), index=False)
 
     # Calculate True Positives (TP) and False Positives (FP)
     TP = (
@@ -568,15 +594,15 @@ def main(
 
     ### saving results
     df_test_acc = pd.DataFrame({"Testing Pre": [precision]})
-    df_test_acc.to_csv(result_path + "Testing_best_Pre.csv", index=False)
+    df_test_acc.to_csv(os.path.join(result_path, "Testing_best_Pre.csv"), index=False)
 
-    model_str = model_type if not bert_use_temporal_conv else model_type + "_TCN"
-    model_str = model_str + f"_seed{SEED_CUS}"
-
-    fig = auc_charts(label_test, output_test, model_str)
-    fig.savefig(
-        f"./output/{model_str}.png",
-    )
+    # model_str = model_type if not bert_use_temporal_conv else model_type + "_TCN"
+    # model_str = model_str + f"_seed{seed_everything}"
+    #
+    # fig = auc_charts(label_test, output_test, model_str)
+    # fig.savefig(
+    #     f"./output/{model_str}.png",
+    # )
 
 
 if __name__ == "__main__":
@@ -586,7 +612,7 @@ if __name__ == "__main__":
         "--model_type",
         "-m",
         default="Transformer",
-        choices=["RNN", "LSTM", "Transformer", "BioClinicalBERT"],
+        choices=["RNN", "LSTM", "Transformer", "BERT_EHR", "BERT"],
         type=str,
     )
     parser.add_argument(
@@ -671,7 +697,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--bert_use_temporal_conv",
         action="store_true",
-        help="BioClinicalBERT: Whether to use a temporal convolution.",
+        help="BERT_EHR: Whether to use a temporal convolution",
+    )
+    parser.add_argument(
+        "--bert_model_str",
+        default="google-bert/bert-base-uncased",
+        type=str,
+        help="BERT: Huggingface model str",
+    )
+    parser.add_argument(
+        "--seed_everything",
+        default=3407,
+        type=int,
+        help="Seed variable for RNG operations",
     )
 
     args = parser.parse_args()

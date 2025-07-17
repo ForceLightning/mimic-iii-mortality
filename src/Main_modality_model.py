@@ -8,7 +8,7 @@ from typing import Literal
 # Third-Party
 from jsonargparse import auto_cli
 from rich.console import Console
-from rich.progress import Progress
+from rich.progress import Progress, TaskID
 
 # Scientific Libraries
 import numpy as np
@@ -27,7 +27,10 @@ from torch.utils.data import DataLoader
 from Model_n_Dataset import (
     BERT,
     BERT_EHR,
+    BERTEmbeddings_EHR,
     BERTEmbeddings_EHR_TCN,
+    BERTEmbeddingsOnly,
+    BioclinicalBERTEmbeddingsDataset,
     CustomLSTM,
     CustomRNN,
     CustomTransformer,
@@ -39,7 +42,6 @@ from Model_n_Dataset import (
     Model_head_3_layers,
     Model_linear_1_layer,
     ModelType,
-    PhenotypeEHRAndReportDataset,
     ReportDataset,
 )
 from utils.roc import auc_charts
@@ -82,6 +84,7 @@ def train_epoch(
     scaler: GradScaler,
     epoch: int,
     progress: Progress,
+    epoch_task: TaskID,
 ):
     epoch_loss = 0.0
     num_batches = len(train_loader)
@@ -91,8 +94,9 @@ def train_epoch(
         optimizer.zero_grad()
 
         ehr: Tensor
-        report: Tensor
+        report: Tensor | list[str]
         label: Tensor
+        num_samples: int = data_tuple[-1].shape[0]
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             match (model_type, data_type):
@@ -101,7 +105,7 @@ def train_epoch(
                     | ModelType.LSTM
                     | ModelType.TRANSFORMER
                     | ModelType.BERT,
-                    DatasetType.EHR | DatasetType.REPORT | DatasetType.PHENOTYPE_REPORT,
+                    DatasetType.EHR | DatasetType.REPORT,
                 ):
                     data, label = data_tuple
                     if isinstance(data, Tensor):
@@ -110,12 +114,11 @@ def train_epoch(
 
                     output = model(data)
 
-                case (
-                    ModelType.BERT_EHR,
-                    DatasetType.EHR_AND_REPORT | DatasetType.PHENOTYPE_EHR_AND_REPORT,
-                ):
+                case (ModelType.BERT_EHR, DatasetType.EHR_AND_REPORT):
                     ehr, report, label, _stay_id = data_tuple
                     ehr = ehr.to(DEVICE)
+                    if isinstance(report, Tensor):
+                        report = report.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
 
                     output = model(report, ehr)
@@ -125,6 +128,22 @@ def train_epoch(
                     ehr = ehr.to(DEVICE)
                     emb = emb.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
+
+                    output = model(ehr, emb)
+
+                case ModelType.BERT_EMB, DatasetType.PHENOTYPE_BCB_EMB:
+                    data, label = data_tuple
+                    if isinstance(data, Tensor):
+                        data = data.to(DEVICE)
+                    label = label.to(DEVICE)
+
+                    output = model(data)
+
+                case ModelType.BERT_EHR, DatasetType.PHENOTYPE_BCB_EMB_EHR:
+                    ehr, emb, label = data_tuple
+                    ehr = ehr.to(DEVICE)
+                    emb = emb.to(DEVICE)
+                    label = label.to(DEVICE)
 
                     output = model(ehr, emb)
 
@@ -143,6 +162,7 @@ def train_epoch(
         epoch_loss += current_loss
 
         progress.console.print(f"Epoch: {epoch + 1}, Batch: {i}, Loss: {current_loss}")
+        progress.advance(epoch_task, num_samples)
         progress.advance(batch_task)
 
     progress.stop_task(batch_task)
@@ -159,6 +179,7 @@ def validate_epoch(
     epoch: int,
     criterion: nn.modules.loss._Loss,
     progress: Progress,
+    epoch_task: TaskID,
 ):
     output_test = []
     label_test = []
@@ -172,10 +193,11 @@ def validate_epoch(
     epoch_loss = 0.0
     progress.console.print("start testing")
     for i, data_tuple in enumerate(test_loader):
+        num_samples: int = data_tuple[-1].shape[0]
         match (model_type, data_type):
             case (
                 ModelType.RNN | ModelType.LSTM | ModelType.TRANSFORMER | ModelType.BERT,
-                DatasetType.EHR | DatasetType.REPORT | DatasetType.PHENOTYPE_REPORT,
+                DatasetType.EHR | DatasetType.REPORT,
             ):
                 data, label = data_tuple
                 if isinstance(data, Tensor):
@@ -184,12 +206,11 @@ def validate_epoch(
 
                 output = model(data)
 
-            case (
-                ModelType.BERT_EHR,
-                DatasetType.EHR_AND_REPORT | DatasetType.PHENOTYPE_EHR_AND_REPORT,
-            ):
+            case (ModelType.BERT_EHR, DatasetType.EHR_AND_REPORT):
                 ehr, report, label, _stay_id = data_tuple
                 ehr = ehr.to(DEVICE)
+                if isinstance(report, Tensor):
+                    report = report.to(DEVICE)
                 label = label.to(DEVICE).unsqueeze(1)
 
                 output = model(report, ehr)
@@ -199,6 +220,22 @@ def validate_epoch(
                 ehr = ehr.to(DEVICE)
                 emb = emb.to(DEVICE)
                 label = label.to(DEVICE).unsqueeze(1)
+
+                output = model(ehr, emb)
+
+            case ModelType.BERT_EMB, DatasetType.PHENOTYPE_BCB_EMB:
+                data, label = data_tuple
+                if isinstance(data, Tensor):
+                    data = data.to(DEVICE)
+                label = label.to(DEVICE)
+
+                output = model(data)
+
+            case ModelType.BERT_EHR, DatasetType.PHENOTYPE_BCB_EMB_EHR:
+                ehr, emb, label = data_tuple
+                ehr = ehr.to(DEVICE)
+                emb = emb.to(DEVICE)
+                label = label.to(DEVICE)
 
                 output = model(ehr, emb)
 
@@ -215,6 +252,7 @@ def validate_epoch(
 
         output_test.append(output.detach().cpu())
         label_test.append(label.detach().cpu())
+        progress.advance(epoch_task, num_samples)
 
     progress.stop_task(batch_task)
     progress.remove_task(batch_task)
@@ -253,7 +291,7 @@ def test(
                     | ModelType.LSTM
                     | ModelType.TRANSFORMER
                     | ModelType.BERT,
-                    DatasetType.EHR | DatasetType.REPORT | DatasetType.PHENOTYPE_REPORT,
+                    DatasetType.EHR | DatasetType.REPORT,
                 ):
                     data, label = data_tuple
                     if isinstance(data, Tensor):
@@ -262,12 +300,11 @@ def test(
 
                     output = model(data)
 
-                case (
-                    ModelType.BERT_EHR,
-                    DatasetType.EHR_AND_REPORT | DatasetType.PHENOTYPE_EHR_AND_REPORT,
-                ):
+                case (ModelType.BERT_EHR, DatasetType.EHR_AND_REPORT):
                     ehr, report, label, _stay_id = data_tuple
                     ehr = ehr.to(DEVICE)
+                    if isinstance(report, Tensor):
+                        report = report.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
 
                     output = model(report, ehr)
@@ -277,6 +314,22 @@ def test(
                     ehr = ehr.to(DEVICE)
                     emb = emb.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
+
+                    output = model(ehr, emb)
+
+                case ModelType.BERT_EMB, DatasetType.PHENOTYPE_BCB_EMB:
+                    data, label = data_tuple
+                    if isinstance(data, Tensor):
+                        data = data.to(DEVICE)
+                    label = label.to(DEVICE)
+
+                    output = model(data)
+
+                case ModelType.BERT_EHR, DatasetType.PHENOTYPE_BCB_EMB_EHR:
+                    ehr, emb, label = data_tuple
+                    ehr = ehr.to(DEVICE)
+                    emb = emb.to(DEVICE)
+                    label = label.to(DEVICE)
 
                     output = model(ehr, emb)
 
@@ -330,8 +383,20 @@ def train_and_validate(
     scaler = GradScaler()  # Automatic Mixed Precision
 
     # training loop
-    with Progress(auto_refresh=False) as progress:
-        epoch_task = progress.add_task("[green]Epochs", total=num_epochs)
+    with Progress() as progress:
+        batch_size = train_loader.batch_size if train_loader.batch_size else 16
+        total_train_samples = (
+            len(train_loader.dataset)  # pyright: ignore[reportArgumentType]
+            // batch_size
+            * num_epochs
+            * batch_size
+        )
+        total_test_samples = (
+            len(test_loader.dataset) * num_epochs  # pyright: ignore[reportArgumentType]
+        )
+        total_samples = total_train_samples + total_test_samples
+
+        epoch_task = progress.add_task("[green]Total samples", total=total_samples)
         for epoch in range(num_epochs):
             # start training
             progress.console.print("start training")
@@ -348,6 +413,7 @@ def train_and_validate(
                 scaler,
                 epoch,
                 progress,
+                epoch_task,
             )
 
             avg_epoch_loss = epoch_loss / num_batches
@@ -358,7 +424,14 @@ def train_and_validate(
             scheduler.step()
 
             output_test, label_test = validate_epoch(
-                model, test_loader, model_type, data_type, epoch, criterion, progress
+                model,
+                test_loader,
+                model_type,
+                data_type,
+                epoch,
+                criterion,
+                progress,
+                epoch_task,
             )
 
             # Calculate AUROC or AUPRC
@@ -401,7 +474,6 @@ def find_optimal_thresholds(label_test: Tensor, output: Tensor) -> Tensor:
 def main(
     model_type: ModelType,
     data_type: DatasetType,
-    num_classes: int = 1,
     data_dir: str = DATA_DIR,
     checkpoints_dir: str = CHECKPOINTS_DIR,
     batch_size: int = 64,
@@ -439,18 +511,39 @@ def main(
     train_dataset = Dataset(os.path.join(data_dir, train_dir))
     test_dataset = Dataset(os.path.join(data_dir, test_dir))
 
+    num_classes = train_dataset.num_classes
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=8,
+        num_workers=(
+            16
+            if data_type
+            in [
+                DatasetType.BCB_EMB_EHR,
+                DatasetType.PHENOTYPE_BCB_EMB,
+                DatasetType.PHENOTYPE_BCB_EMB_EHR,
+            ]
+            else 8
+        ),
         persistent_workers=True,
+        drop_last=True,
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=8,
+        num_workers=(
+            16
+            if data_type
+            in [
+                DatasetType.BCB_EMB_EHR,
+                DatasetType.PHENOTYPE_BCB_EMB,
+                DatasetType.PHENOTYPE_BCB_EMB_EHR,
+            ]
+            else 8
+        ),
         persistent_workers=True,
     )
 
@@ -497,7 +590,6 @@ def main(
                     output_l1_dim,
                     output_l2_dim,
                     output_l3_dim,
-                    num_classes=num_classes,
                 ),
             )
             model_name_list = ["Model_RNN", "Model_head_linear"]
@@ -538,11 +630,21 @@ def main(
                 trans_dropout,
                 output_l1_dim,
                 output_l2_dim,
-                num_classes=num_classes,
+                train_dataset[0][-1].numel(),
             )
             model_name_list = [model_type_detailed]
 
-        case ModelType.BERT_EHR, EHRAndReportDataset() | PhenotypeEHRAndReportDataset():
+        case ModelType.BERT, BioclinicalBERTEmbeddingsDataset():
+            model_sequential = BERT(
+                bert_model_str,
+                trans_dropout,
+                output_l1_dim,
+                output_l2_dim,
+                train_dataset[0][-1].numel(),
+            )
+            model_name_list = [model_type_detailed]
+
+        case ModelType.BERT_EHR, EHRAndReportDataset():
             print(model_type, train_dataset[0][0].shape)
             model_sequential = BERT_EHR(
                 train_dataset[0][0].shape[-1],
@@ -550,7 +652,7 @@ def main(
                 output_l1_dim,
                 output_l2_dim,
                 bert_use_temporal_conv,
-                num_classes=num_classes,
+                train_dataset[0][2].numel(),
             )
             model_name_list = [model_type_detailed]
 
@@ -561,7 +663,28 @@ def main(
                 trans_dropout,
                 output_l1_dim,
                 output_l2_dim,
-                num_classes=num_classes,
+                train_dataset[0][-1].numel(),
+            )
+            model_name_list = [model_type_detailed]
+
+        case ModelType.BERT_EMB, BioclinicalBERTEmbeddingsDataset():
+            model_sequential = BERTEmbeddingsOnly(
+                train_dataset[0][0].shape[-1],
+                trans_dropout,
+                output_l1_dim,
+                output_l2_dim,
+                train_dataset[0][-1].numel(),
+            )
+            model_name_list = [model_type_detailed]
+
+        case ModelType.BERT_EHR, EHRAndBioclinicalBERTEmbeddingsDataset():
+            model_sequential = BERTEmbeddings_EHR(
+                train_dataset[0][0].shape[-1],
+                train_dataset[0][1].shape[-1],
+                trans_dropout,
+                output_l1_dim,
+                output_l2_dim,
+                train_dataset[0][2].numel(),
             )
             model_name_list = [model_type_detailed]
 

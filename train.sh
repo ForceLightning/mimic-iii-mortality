@@ -66,10 +66,10 @@ function BioclinicalBERT_Embeddings_TCN() {
 }
 
 function phenotyping_BERT() {
-  echo "BERT (phenotyping) seed $1"
+  echo "BERT emb (phenotyping) seed $1"
   TOKENIZERS_PARALLELISM=true uv run --env-file .env -- python -m Main_modality_model \
-    --model_type BERT \
-    --data_type PHENOTYPE_REPORT \
+    --model_type BERT_EMB \
+    --data_type PHENOTYPE_BCB_EMB \
     --data_dir ./data \
     --checkpoints_dir ./checkpoints/ \
     --batch_size 16 \
@@ -81,13 +81,13 @@ function phenotyping_BERT() {
 }
 
 function phenotyping_BERT_EHR() {
-  echo "BERT (phenotyping + EHR) seed $1"
+  echo "BERT emb (phenotyping + EHR) seed $1"
   TOKENIZERS_PARALLELISM=true uv run --env-file .env -- python -m Main_modality_model \
-    --model_type BERT \
-    --data_type PHENOTYPE_EHR_AND_REPORT \
+    --model_type BERT_EHR \
+    --data_type PHENOTYPE_BCB_EMB_EHR \
     --data_dir ./data \
     --checkpoints_dir ./checkpoints/ \
-    --batch-size 16 \
+    --batch_size 16 \
     --num_epoch 10 \
     --lr 3e-4 \
     --output_l1_dim 256 \
@@ -117,4 +117,4 @@ function loop_3407_3409_params() {
 # loop_3407_3409 BioclinicalBERT_Embeddings_TCN
 
 loop_3407_3409 phenotyping_BERT
-loop_3407_3409 phenotyping_BERT_EHR
+# loop_3407_3409 phenotyping_BERT_EHR

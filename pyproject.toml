@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "gensim>=4.3.3",
+    "jsonargparse[argcomplete,omegaconf,signatures,typing-extensions]>=4.40.0",
     "matplotlib>=3.10.3",
     "pandas>=2.3.0",
     "rich>=14.0.0",

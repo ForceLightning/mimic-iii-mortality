@@ -1,9 +1,18 @@
 # Standard Library
 import os
+from enum import Enum, auto
+from functools import partial
 from typing import Literal, override
 
 # Scientific Libraries
 import pandas as pd
+from sklearn.metrics import (
+    average_precision_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 
 # PyTorch
 import torch
@@ -19,6 +28,71 @@ class DatasetType(Enum):
     REPORT = auto()
     EHR_AND_REPORT = auto()
     BCB_EMB_EHR = auto()
+    # TODO: Replace PHENOTYPE_REPORT with PHENOTYPE_BCB_EMB
+    PHENOTYPE_REPORT = auto()
+    PHENOTYPE_EHR_AND_REPORT = auto()
+
+    def get_train_test_dir(self) -> tuple[str, str]:
+        match self:
+            case (
+                DatasetType.EHR
+                | DatasetType.REPORT
+                | DatasetType.EHR_AND_REPORT
+                | DatasetType.BCB_EMB_EHR
+            ):
+                return "train_with_raw_report", "test_with_raw_report"
+            case DatasetType.PHENOTYPE_REPORT | DatasetType.PHENOTYPE_EHR_AND_REPORT:
+                return (
+                    "phenotyping_first_48_hour/train",
+                    "phenotyping_first_48_hour/test",
+                )
+
+    def get_dataset_class(self):
+        match self:
+            case DatasetType.EHR:
+                return EHRDataset
+            case DatasetType.REPORT | DatasetType.PHENOTYPE_REPORT:
+                return ReportDataset
+            case DatasetType.EHR_AND_REPORT:
+                return EHRAndReportDataset
+            case DatasetType.BCB_EMB_EHR:
+                return EHRAndBioclinicalBERTEmbeddingsDataset
+            case DatasetType.PHENOTYPE_EHR_AND_REPORT:
+                return PhenotypeEHRAndReportDataset
+
+    def get_eval_fn(self):
+        match self:
+            case (
+                DatasetType.EHR
+                | DatasetType.REPORT
+                | DatasetType.EHR_AND_REPORT
+                | DatasetType.BCB_EMB_EHR
+            ):
+                return (
+                    roc_auc_score,
+                    average_precision_score,
+                    precision_score,
+                    recall_score,
+                    f1_score,
+                )
+            case DatasetType.PHENOTYPE_REPORT | DatasetType.PHENOTYPE_EHR_AND_REPORT:
+                ret = [
+                    roc_auc_score,
+                    average_precision_score,
+                    precision_score,
+                    recall_score,
+                    f1_score,
+                ]
+                return (partial(fn, average="micro") for fn in ret)
+
+
+class ModelType(Enum):
+    RNN = auto()
+    LSTM = auto()
+    TRANSFORMER = auto()
+    BERT = auto()
+    BERT_EHR = auto()
+    TCN = auto()
 
 
 # define and create dataset (using processed EHR from MIMIC III data)
@@ -53,13 +127,18 @@ class EHRDataset(Dataset[tuple[Tensor, Tensor]]):
 
 # define and create dataset (using processed EHR from MIMIC III data)
 class ReportDataset(Dataset[tuple[str, Tensor]]):
-    def __init__(self, root_dir):
+    def __init__(self, root_dir: str, drop_duplicates: bool = False):
+        self.root_dir = root_dir
+        self.drop_duplicates = drop_duplicates
         self.report_dir = os.path.join(root_dir, "Report/")
         label_path = os.path.join(root_dir, "labels.csv")
 
         self.labels_df = pd.read_csv(label_path, index_col=False)
         self.stay_ids = self.labels_df["stay"].astype(str)
-        self.labels = self.labels_df["y_true"].astype(int)
+        if "phenotyping" in root_dir:
+            self.labels = self.labels_df.iloc[:, 2:].astype(int)
+        else:
+            self.labels = self.labels_df["y_true"].astype(int)
 
     def __len__(self):
         return len(self.labels_df)
@@ -69,7 +148,12 @@ class ReportDataset(Dataset[tuple[str, Tensor]]):
 
         report_path = os.path.join(self.report_dir, f"{stay_id}")
         report_df = pd.read_csv(report_path, index_col=False, encoding="utf-8").ffill()
-        reports = report_df["Note"].drop_duplicates().to_list()
+        if "phenotyping" in self.root_dir:
+            reports = report_df.values.tolist()
+        else:
+            reports = report_df["Note"]
+        if self.drop_duplicates:
+            reports = reports.drop_duplicates().to_list()
         reports = self.__remove_spaces_from_report(reports)
         reports = " [SEP] ".join(reports)
         text = "[CLS] " + reports
@@ -174,6 +258,56 @@ class EHRAndBioclinicalBERTEmbeddingsDataset(Dataset[tuple[Tensor, Tensor, Tenso
         return ehr_tensor, emb_tensor, label
 
 
+class PhenotypeEHRAndReportDataset(Dataset[tuple[Tensor, str, Tensor]]):
+    def __init__(self, root_dir: str) -> None:
+        super().__init__()
+        self.ehr_dir = os.path.join(root_dir, "EHR")
+        self.report_dir = os.path.join(root_dir, "Report")
+
+        label_path = os.path.join(root_dir, "labels.csv")
+        self.labels_df = pd.read_csv(label_path, index_col=False)
+        self.stay_ids = self.labels_df["stay"].astype(str)
+        self.labels = self.labels_df.iloc[:, 2:].astype(int)
+
+    def __len__(self):
+        return len(self.labels_df)
+
+    def __getitem__(self, index) -> tuple[Tensor, str, Tensor]:
+        """Get sample at index.
+
+        Args:
+            index: Index of data sample.
+
+        Returns:
+            tuple[Tensor, str, Tensor]: Tuple of EHR tensor, report text in str format, and label tensor.
+        """
+        stay_id: str = self.stay_ids[index]  # pyright: ignore
+
+        # Get report.
+        report_path = os.path.join(self.report_dir, stay_id)
+        report_df = pd.read_csv(report_path, index_col=False, encoding="utf-8").ffill()
+        reports = report_df["Note"].drop_duplicates().to_list()
+        reports = self.__remove_spaces_from_report(reports)
+        reports = " [SEP] ".join(reports)
+        text = "[CLS] " + reports
+
+        # Get EHR data.
+        ehr_path = os.path.join(self.ehr_dir, stay_id)
+        ehr_df = (
+            pd.read_csv(ehr_path, index_col=False, encoding="utf-8")
+            .apply(pd.to_numeric, errors="coerce")
+            .ffill()
+        )
+        ehr_tensor = torch.tensor(ehr_df.values, dtype=torch.float32)
+        label = torch.tensor(self.labels.iloc[index], dtype=torch.long)
+
+        return ehr_tensor, text, label
+
+    def __remove_spaces_from_report(self, reports: list[str]) -> list[str]:
+        reports = list(map(lambda x: x[::2], reports))
+        return reports
+
+
 # define 1 linear layer class
 class Model_linear_1_layer(nn.Module):
     def __init__(self, input_dim, output_dim):
@@ -186,11 +320,18 @@ class Model_linear_1_layer(nn.Module):
 
 # define RNN class
 class CustomRNN(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers=1):
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        num_layers: int = 1,
+        num_classes: int = 1,
+    ):
         super(CustomRNN, self).__init__()
         self.tanh = nn.Tanh()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.num_classes = num_classes
 
         self.weight_ax = nn.ParameterList(
             [
@@ -256,17 +397,28 @@ class CustomRNN(nn.Module):
     @torch.no_grad()
     def predict(self, data: Tensor) -> Tensor:
         result = self.forward(data)
-        return result.sigmoid()
+        match self.num_classes:
+            case 1:
+                return result.sigmoid()
+            case _:
+                return result.softmax(dim=1)
 
 
 # define LSTM class
 class CustomLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers=1):
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        num_layers: int = 1,
+        num_classes: int = 1,
+    ):
         super(CustomLSTM, self).__init__()
         self.tanh = nn.Tanh()
         self.sigmoid = nn.Sigmoid()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.num_classes = num_classes
 
         self.weight_ix = nn.ParameterList(
             [
@@ -409,16 +561,28 @@ class CustomLSTM(nn.Module):
     @torch.no_grad()
     def predict(self, data: Tensor) -> Tensor:
         result = self.forward(data)
-        return result.sigmoid()
+        match self.num_classes:
+            case 1:
+                return result.sigmoid()
+            case _:
+                return result.softmax(dim=1)
 
 
 # Transformer block
 class CustomTransformerBlock(nn.Module):
-    def __init__(self, Trans_input_dim, Trans_n_heads, Trans_ff_dim, Trans_dropout):
+    def __init__(
+        self,
+        Trans_input_dim: int,
+        Trans_n_heads: int,
+        Trans_ff_dim: int,
+        Trans_dropout: float,
+        num_classes: int = 1,
+    ):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(
             Trans_input_dim, Trans_n_heads, dropout=Trans_dropout, batch_first=True
         )
+        self.num_classes = num_classes
 
         self.ffn = nn.Sequential(
             nn.Linear(Trans_input_dim, Trans_ff_dim),
@@ -446,15 +610,17 @@ class CustomTransformerBlock(nn.Module):
 class CustomTransformer(nn.Module):
     def __init__(
         self,
-        Trans_input_dim,
-        Trans_n_heads,
-        Trans_ff_dim,
-        Trans_num_layers,
-        Trans_max_len,
-        Trans_dropout,
+        Trans_input_dim: int,
+        Trans_n_heads: int,
+        Trans_ff_dim: int,
+        Trans_num_layers: int,
+        Trans_max_len: int,
+        Trans_dropout: float,
+        num_classes: int = 1,
     ):
         super().__init__()
         self.cls_token = nn.Parameter(torch.randn(1, 1, Trans_input_dim))
+        self.num_classes = num_classes
 
         self.pos_embed = nn.Parameter(
             torch.zeros(1, Trans_max_len + 1, Trans_input_dim)
@@ -491,7 +657,11 @@ class CustomTransformer(nn.Module):
     @torch.no_grad()
     def predict(self, data: Tensor) -> Tensor:
         result = self.forward(data)
-        return result.sigmoid()
+        match self.num_classes:
+            case 1:
+                return result.sigmoid()
+            case _:
+                return result.softmax(dim=1)
 
 
 class BERT(nn.Module):
@@ -505,8 +675,10 @@ class BERT(nn.Module):
         dropout_p: float = 0.5,
         n_fc_1: int = 256,
         n_fc_2: int = 48,
+        num_classes: int = 1,
     ) -> None:
         super().__init__()
+        self.num_classes = num_classes
         self.tokenizer: BertTokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model: BertModel = AutoModel.from_pretrained(model_name)
         self.dropout = nn.Dropout(p=dropout_p)
@@ -519,7 +691,7 @@ class BERT(nn.Module):
         self.linear_1 = nn.Linear(self.model.config.hidden_size, n_fc_1)
         self.relu = nn.ReLU()
         self.linear_2 = nn.Linear(n_fc_1, n_fc_2)
-        self.classifier = nn.Linear(n_fc_2, 1)
+        self.classifier = nn.Linear(n_fc_2, num_classes)
 
     def forward(self, x_text: list[str]) -> Tensor:
         inputs = self.tokenizer(
@@ -545,8 +717,12 @@ class BERT(nn.Module):
 
     @torch.no_grad()
     def predict(self, x_text: list[str]) -> Tensor:
-        out = self.forward(x_text)
-        return out.sigmoid()
+        result = self.forward(x_text)
+        match self.num_classes:
+            case 1:
+                return result.sigmoid()
+            case _:
+                return result.softmax(dim=1)
 
 
 class BERT_EHR(nn.Module):
@@ -557,8 +733,10 @@ class BERT_EHR(nn.Module):
         n_fc_1: int = 256,
         n_fc_2: int = 48,
         temporal_conv: bool = False,
+        num_classes: int = 1,
     ):
         super().__init__()
+        self.num_classes = num_classes
         self.tokenizer: BertTokenizer = AutoTokenizer.from_pretrained(
             "emilyalsentzer/Bio_ClinicalBERT"
         )
@@ -597,7 +775,7 @@ class BERT_EHR(nn.Module):
         self.linear_1 = nn.Linear(50 + static_size, n_fc_1)
         self.relu = nn.ReLU()
         self.linear_2 = nn.Linear(n_fc_1, n_fc_2)
-        self.classifier = nn.Linear(n_fc_2, 1)
+        self.classifier = nn.Linear(n_fc_2, num_classes)
 
     def forward(self, x_text: list[str], x_static: Tensor) -> Tensor:
         inputs = self.tokenizer(
@@ -636,8 +814,12 @@ class BERT_EHR(nn.Module):
 
     @torch.no_grad()
     def predict(self, x_test: list[str], x_static: Tensor) -> Tensor:
-        out = self.forward(x_test, x_static)
-        return out.sigmoid()
+        result = self.forward(x_test, x_static)
+        match self.num_classes:
+            case 1:
+                return result.sigmoid()
+            case _:
+                return result.softmax(dim=1)
 
 
 class BERTEmbeddings_EHR_TCN(nn.Module):
@@ -648,8 +830,10 @@ class BERTEmbeddings_EHR_TCN(nn.Module):
         dropout_p: float = 0.5,
         n_fc_1: int = 256,
         n_fc_2: int = 48,
+        num_classes: int = 1,
     ) -> None:
         super().__init__()
+        self.num_classes = num_classes
 
         self.ehr_tcn = nn.Sequential(
             nn.Conv1d(static_size, static_size, kernel_size=3, stride=3),
@@ -690,7 +874,7 @@ class BERTEmbeddings_EHR_TCN(nn.Module):
         self.linear_1 = nn.Linear(emb_dim + static_size, n_fc_1)
         self.relu = nn.ReLU()
         self.linear_2 = nn.Linear(n_fc_1, n_fc_2)
-        self.classifier = nn.Linear(n_fc_2, 1)
+        self.classifier = nn.Linear(n_fc_2, num_classes)
 
     def forward(self, x_ehr: Tensor, x_emb: Tensor) -> Tensor:
         ehr_sqz = self.ehr_tcn(x_ehr.permute(0, 2, 1)).squeeze(dim=2)
@@ -716,14 +900,26 @@ class BERTEmbeddings_EHR_TCN(nn.Module):
 
     @torch.no_grad()
     def predict(self, x_ehr: Tensor, x_emb: Tensor) -> Tensor:
-        out = self.forward(x_ehr, x_emb)
-        return out.sigmoid()
+        result = self.forward(x_ehr, x_emb)
+        match self.num_classes:
+            case 1:
+                return result.sigmoid()
+            case _:
+                return result.softmax(dim=1)
 
 
 # define 3 linear layers model
 class Model_head_3_layers(nn.Module):
-    def __init__(self, input_dim, output_l1_dim, output_l2_dim, output_l3_dim):
-        super(Model_head_3_layers, self).__init__()
+    def __init__(
+        self,
+        input_dim: int,
+        output_l1_dim: int,
+        output_l2_dim: int,
+        output_l3_dim: int,
+        num_classes: int = 1,
+    ):
+        super().__init__()
+        self.num_classes = num_classes
         self.model = nn.Sequential(
             nn.Linear(input_dim, output_l1_dim),
             nn.ReLU(),
@@ -733,20 +929,39 @@ class Model_head_3_layers(nn.Module):
             nn.Sigmoid(),
         )
 
-    def forward(self, data):
+    def forward(self, data: Tensor) -> Tensor:
         data = data.squeeze(1)
         return self.model(data)
+
+    @torch.no_grad()
+    def predict(self, data: Tensor) -> Tensor:
+        result = self.forward(data)
+        match self.num_classes:
+            case 1:
+                return result.sigmoid()
+            case _:
+                return result.softmax(dim=1)
 
 
 # define 1 linear layer class
 class Model_head_1_layer(nn.Module):
-    def __init__(self, input_dim, output_dim):
-        super(Model_head_1_layer, self).__init__()
+    def __init__(self, input_dim: int, output_dim: int, num_classes: int = 1):
+        super().__init__()
+        self.num_classes = num_classes
         self.model = nn.Sequential(nn.Linear(input_dim, output_dim), nn.Sigmoid())
 
-    def forward(self, data):
+    def forward(self, data: Tensor) -> Tensor:
         data = data.squeeze(1)
         return self.model(data)
+
+    @torch.no_grad()
+    def predict(self, data: Tensor) -> Tensor:
+        result = self.forward(data)
+        match self.num_classes:
+            case 1:
+                return result.sigmoid()
+            case _:
+                return result.softmax(dim=1)
 
 
 # DEBUG: Check whether the model works

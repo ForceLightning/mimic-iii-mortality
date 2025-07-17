@@ -3,10 +3,10 @@ import copy
 import gc
 import os
 import random
-from argparse import ArgumentParser
 from typing import Literal
 
 # Third-Party
+from jsonargparse import auto_cli
 from rich.console import Console
 from rich.progress import Progress
 
@@ -14,7 +14,7 @@ from rich.progress import Progress
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
-from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
+from sklearn.metrics import roc_curve
 
 # PyTorch
 import torch
@@ -31,12 +31,15 @@ from Model_n_Dataset import (
     CustomLSTM,
     CustomRNN,
     CustomTransformer,
+    DatasetType,
     EHRAndBioclinicalBERTEmbeddingsDataset,
     EHRAndReportDataset,
     EHRDataset,
     Model_head_1_layer,
     Model_head_3_layers,
     Model_linear_1_layer,
+    ModelType,
+    PhenotypeEHRAndReportDataset,
     ReportDataset,
 )
 from utils.roc import auc_charts
@@ -72,8 +75,8 @@ CHECKPOINTS_DIR = "./checkpoints/"
 def train_epoch(
     model: nn.Module,
     train_loader: DataLoader,
-    model_type: str,
-    data_type: str,
+    model_type: ModelType,
+    data_type: DatasetType,
     optimizer: Optimizer,
     criterion: nn.modules.loss._Loss,
     scaler: GradScaler,
@@ -93,7 +96,13 @@ def train_epoch(
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             match (model_type, data_type):
-                case "RNN" | "LSTM" | "Transformer" | "BERT", "EHR" | "Report":
+                case (
+                    ModelType.RNN
+                    | ModelType.LSTM
+                    | ModelType.TRANSFORMER
+                    | ModelType.BERT,
+                    DatasetType.EHR | DatasetType.REPORT | DatasetType.PHENOTYPE_REPORT,
+                ):
                     data, label = data_tuple
                     if isinstance(data, Tensor):
                         data = data.to(DEVICE)
@@ -101,14 +110,17 @@ def train_epoch(
 
                     output = model(data)
 
-                case "BERT_EHR", "EHRAndReport":
+                case (
+                    ModelType.BERT_EHR,
+                    DatasetType.EHR_AND_REPORT | DatasetType.PHENOTYPE_EHR_AND_REPORT,
+                ):
                     ehr, report, label, _stay_id = data_tuple
                     ehr = ehr.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
 
                     output = model(report, ehr)
 
-                case "TCN", "EHRAndEmbeddings":
+                case ModelType.TCN, DatasetType.BCB_EMB_EHR:
                     ehr, emb, label = data_tuple
                     ehr = ehr.to(DEVICE)
                     emb = emb.to(DEVICE)
@@ -142,8 +154,8 @@ def train_epoch(
 def validate_epoch(
     model: nn.Module,
     test_loader: DataLoader,
-    model_type: str,
-    data_type: str,
+    model_type: ModelType,
+    data_type: DatasetType,
     epoch: int,
     criterion: nn.modules.loss._Loss,
     progress: Progress,
@@ -160,26 +172,29 @@ def validate_epoch(
     epoch_loss = 0.0
     progress.console.print("start testing")
     for i, data_tuple in enumerate(test_loader):
-        match (model, data_type):
+        match (model_type, data_type):
             case (
-                CustomRNN() | CustomLSTM() | CustomTransformer() | BERT(),
-                "EHR" | "Report",
+                ModelType.RNN | ModelType.LSTM | ModelType.TRANSFORMER | ModelType.BERT,
+                DatasetType.EHR | DatasetType.REPORT | DatasetType.PHENOTYPE_REPORT,
             ):
                 data, label = data_tuple
                 if isinstance(data, Tensor):
                     data = data.to(DEVICE)
                 label = label.to(DEVICE).unsqueeze(1)
 
-                output = model(data)  # pyright: ignore
-            case BERT_EHR(), "EHRAndReport":
+                output = model(data)
+
+            case (
+                ModelType.BERT_EHR,
+                DatasetType.EHR_AND_REPORT | DatasetType.PHENOTYPE_EHR_AND_REPORT,
+            ):
                 ehr, report, label, _stay_id = data_tuple
                 ehr = ehr.to(DEVICE)
                 label = label.to(DEVICE).unsqueeze(1)
 
-                assert isinstance(model, BERT_EHR)
                 output = model(report, ehr)
 
-            case BERTEmbeddings_EHR_TCN(), "EHRAndEmbeddings":
+            case ModelType.TCN, DatasetType.BCB_EMB_EHR:
                 ehr, emb, label = data_tuple
                 ehr = ehr.to(DEVICE)
                 emb = emb.to(DEVICE)
@@ -213,8 +228,8 @@ def validate_epoch(
 def test(
     model: nn.Module,
     test_loader: DataLoader,
-    model_type: str,
-    data_type: str,
+    model_type: ModelType,
+    data_type: DatasetType,
     model_path: str,
     model_name_list: list[str],
 ):
@@ -232,32 +247,38 @@ def test(
         ### testing
         task = progress.add_task("Test batches", total=len(test_loader))
         for data_tuple in test_loader:
-            match (model, data_type):
+            match (model_type, data_type):
                 case (
-                    CustomRNN() | CustomLSTM() | CustomTransformer() | BERT(),
-                    "EHR" | "Report",
+                    ModelType.RNN
+                    | ModelType.LSTM
+                    | ModelType.TRANSFORMER
+                    | ModelType.BERT,
+                    DatasetType.EHR | DatasetType.REPORT | DatasetType.PHENOTYPE_REPORT,
                 ):
                     data, label = data_tuple
                     if isinstance(data, Tensor):
                         data = data.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
 
-                    output = model.predict(data)  # pyright: ignore
-                case BERT_EHR(), "EHRAndReport":
+                    output = model(data)
+
+                case (
+                    ModelType.BERT_EHR,
+                    DatasetType.EHR_AND_REPORT | DatasetType.PHENOTYPE_EHR_AND_REPORT,
+                ):
                     ehr, report, label, _stay_id = data_tuple
                     ehr = ehr.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
 
-                    assert isinstance(model, BERT_EHR)
-                    output = model.predict(report, ehr)
+                    output = model(report, ehr)
 
-                case BERTEmbeddings_EHR_TCN(), "EHRAndEmbeddings":
+                case ModelType.TCN, DatasetType.BCB_EMB_EHR:
                     ehr, emb, label = data_tuple
                     ehr = ehr.to(DEVICE)
                     emb = emb.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
 
-                    output = model.predict(ehr, emb)
+                    output = model(ehr, emb)
 
                 case _, _:
                     raise NotImplementedError(
@@ -278,8 +299,9 @@ def test(
         label_test = torch.cat(label_test).detach().cpu()
 
         # calculate AUROC and AUPRC
-        auroc = roc_auc_score(label_test, output_test)
-        auprc = average_precision_score(label_test, output_test)
+        roc_auc, ap_score, *_ = data_type.get_eval_fn()
+        auroc = roc_auc(label_test, output_test)
+        auprc = ap_score(label_test, output_test)
 
         progress.console.print(f"AUROC: {auroc:.4f}")
         progress.console.print(f"AUPRC: {auprc:.4f}")
@@ -293,8 +315,8 @@ def train_and_validate(
     model: nn.Module,
     train_loader: DataLoader,
     test_loader: DataLoader,
-    model_type: str,
-    data_type: str,
+    model_type: ModelType,
+    data_type: DatasetType,
     num_epochs: int,
     optimizer: Optimizer,
     scheduler: LRScheduler,
@@ -340,7 +362,8 @@ def train_and_validate(
             )
 
             # Calculate AUROC or AUPRC
-            auroc = roc_auc_score(label_test, output_test)
+            roc_auc, *_ = data_type.get_eval_fn()
+            auroc = roc_auc(label_test, output_test)
             # auprc = average_precision_score(label_test, output_test)
 
             # saving results
@@ -362,9 +385,23 @@ def train_and_validate(
     return best_model
 
 
+def find_optimal_thresholds(label_test: Tensor, output: Tensor) -> Tensor:
+    n_classes = label_test.shape[1]
+    thresholds = []
+
+    for i in range(n_classes):
+        fpr, tpr, thresh = roc_curve(label_test[:, i], output[:, i])
+        youden_j = tpr - fpr
+        best_thresh = thresh[np.argmax(youden_j)]
+        thresholds.append(best_thresh)
+
+    return torch.as_tensor(thresholds, device=output.device, dtype=output.dtype)
+
+
 def main(
-    model_type: Literal["RNN", "LSTM", "Transformer", "BERT", "BERT_EHR", "TCN"],
-    data_type: Literal["EHR", "Report", "EHRAndReport", "EHRAndEmbeddings"],
+    model_type: ModelType,
+    data_type: DatasetType,
+    num_classes: int = 1,
     data_dir: str = DATA_DIR,
     checkpoints_dir: str = CHECKPOINTS_DIR,
     batch_size: int = 64,
@@ -392,20 +429,15 @@ def main(
 ):
     set_seed(seed_everything)
     # define train and test dataset
-    match data_type:
-        case "EHR":
-            Dataset = EHRDataset
-        case "Report":
-            Dataset = ReportDataset
-        case "EHRAndReport":
-            Dataset = EHRAndReportDataset
-        case "EHRAndEmbeddings":
-            Dataset = EHRAndBioclinicalBERTEmbeddingsDataset
+
+    Dataset = data_type.get_dataset_class()
 
     assert Dataset is not None
 
-    train_dataset = Dataset(os.path.join(data_dir, "train_with_raw_report"))
-    test_dataset = Dataset(os.path.join(data_dir, "test_with_raw_report"))
+    train_dir, test_dir = data_type.get_train_test_dir()
+
+    train_dataset = Dataset(os.path.join(data_dir, train_dir))
+    test_dataset = Dataset(os.path.join(data_dir, test_dir))
 
     train_loader = DataLoader(
         train_dataset,
@@ -424,11 +456,11 @@ def main(
 
     ### model saving
     # change path accroding to the model structure (Encoder/Discriminator/Scheduler) and data (partial or full)
-    model_type_detailed = model_type
-    if "BERT" in model_type:
+    model_type_detailed = str(model_type)
+    if model_type == ModelType.BERT:
         model_type_detailed = bert_model_str.split("/")[1]
     model_path = os.path.join(
-        f"{checkpoints_dir}/Dataset_{str(data_type)}_Model_{model_type}{"_tcn" if bert_use_temporal_conv else ""}_epoch_{str(num_epoch)}_CosLR_lr_{str(lr)}_seed{str(seed_everything)}/",
+        f"{checkpoints_dir}/Dataset_{str(data_type)}_Model_{str(model_type)}{"_tcn" if bert_use_temporal_conv else ""}_epoch_{str(num_epoch)}_CosLR_lr_{str(lr)}_seed{str(seed_everything)}/",
         model_type_detailed,
     )
     if not os.path.exists(model_path):
@@ -441,7 +473,7 @@ def main(
     ### result saving
     # change path accroding to the model structure (Encoder/Discriminator/Scheduler) and data (partial or full)
     result_path = os.path.join(
-        f"{checkpoints_dir}/Dataset_{str(data_type)}_Model_{model_type}{"_tcn" if bert_use_temporal_conv else ""}_epoch_{str(num_epoch)}_CosLR_lr_{str(lr)}_seed{str(seed_everything)}/",
+        f"{checkpoints_dir}/Dataset_{str(data_type)}_Model_{str(model_type)}{"_tcn" if bert_use_temporal_conv else ""}_epoch_{str(num_epoch)}_CosLR_lr_{str(lr)}_seed{str(seed_everything)}/",
         model_type_detailed,
     )
     if not os.path.exists(result_path):
@@ -457,7 +489,7 @@ def main(
     # define models
     model_sequential: nn.Module
     match (model_type, train_dataset):
-        case "RNN", EHRDataset() | ReportDataset():
+        case ModelType.RNN, EHRDataset() | ReportDataset():
             model_sequential = nn.Sequential(
                 CustomRNN(train_dataset[0][0].shape[-1], hidden_size, num_layers),
                 Model_head_3_layers(
@@ -465,11 +497,12 @@ def main(
                     output_l1_dim,
                     output_l2_dim,
                     output_l3_dim,
+                    num_classes=num_classes,
                 ),
             )
             model_name_list = ["Model_RNN", "Model_head_linear"]
 
-        case "LSTM", EHRDataset() | ReportDataset():
+        case ModelType.LSTM, EHRDataset() | ReportDataset():
             model_sequential = nn.Sequential(
                 CustomLSTM(train_dataset[0][0].shape[-1], hidden_size, num_layers),
                 Model_head_3_layers(
@@ -482,7 +515,7 @@ def main(
             model_name_list = ["Model_LSTM", "Model_head_linear"]
 
         case (
-            "Transformer",
+            ModelType.TRANSFORMER,
             EHRDataset() | ReportDataset(),
         ):
             model_sequential = nn.Sequential(
@@ -499,16 +532,17 @@ def main(
             )
             model_name_list = ["Model_linear", "Model_Transformer", "Model_head_linear"]
 
-        case "BERT", ReportDataset():
+        case ModelType.BERT, ReportDataset():
             model_sequential = BERT(
                 bert_model_str,
                 trans_dropout,
                 output_l1_dim,
                 output_l2_dim,
+                num_classes=num_classes,
             )
             model_name_list = [model_type_detailed]
 
-        case "BERT_EHR", EHRAndReportDataset():
+        case ModelType.BERT_EHR, EHRAndReportDataset() | PhenotypeEHRAndReportDataset():
             print(model_type, train_dataset[0][0].shape)
             model_sequential = BERT_EHR(
                 train_dataset[0][0].shape[-1],
@@ -516,16 +550,18 @@ def main(
                 output_l1_dim,
                 output_l2_dim,
                 bert_use_temporal_conv,
+                num_classes=num_classes,
             )
             model_name_list = [model_type_detailed]
 
-        case "TCN", EHRAndBioclinicalBERTEmbeddingsDataset():
+        case ModelType.TCN, EHRAndBioclinicalBERTEmbeddingsDataset():
             model_sequential = BERTEmbeddings_EHR_TCN(
                 train_dataset[0][0].shape[-1],
                 train_dataset[0][1].shape[-1],
                 trans_dropout,
                 output_l1_dim,
                 output_l2_dim,
+                num_classes=num_classes,
             )
             model_name_list = [model_type_detailed]
 
@@ -592,68 +628,53 @@ def main(
     df_test_acc.to_csv(os.path.join(result_path, "Testing_best_AUPRC.csv"), index=False)
 
     # To find the cut-off (threshold) value that gives the best classification performance from an AUROC
-    fpr, tpr, thresholds = roc_curve(label_test, output_test)
-    # Youden's J statistic
-    j_scores = tpr - fpr
-    j_max_idx = j_scores.argmax()
-    best_threshold = thresholds[j_max_idx]
+    best_threshold = find_optimal_thresholds(label_test, output_test)
     CONSOLE.print(f"Best threshold: {best_threshold}")
 
     # apply threshold on output to calculate following metrics
     # this one needs to be adjusted, regarding the thres value, based on the AUROC maybe?
     output_thresholded = (
-        output_test > best_threshold
+        output_test >= best_threshold
     ).int()  # values > 0.1 → 1, else → 0
 
     # calculate accuracy
-    count = 0
-    for i in range(label_test.size(dim=0)):
-        if output_thresholded[i] == label_test[i]:
-            count = count + 1
+    if num_classes == 1:
+        count = 0
+        for i in range(label_test.size(dim=0)):
+            if output_thresholded[i] == label_test[i]:
+                count = count + 1
 
-    ### print results
-    CONSOLE.print(f"Testing accuracy is {100 * (count / label_test.size(dim=0)):0.2f}%")
+        ### print results
+        CONSOLE.print(
+            f"Testing accuracy is {100 * (count / label_test.size(dim=0)):0.2f}%"
+        )
 
-    ### saving results
-    df_test_acc = pd.DataFrame({"Testing Acc": [count / label_test.size(dim=0)]})
-    df_test_acc.to_csv(os.path.join(result_path, "Testing_best_Acc.csv"), index=False)
+        ### saving results
+        df_test_acc = pd.DataFrame({"Testing Acc": [count / label_test.size(dim=0)]})
+        df_test_acc.to_csv(
+            os.path.join(result_path, "Testing_best_Acc.csv"), index=False
+        )
 
-    # Calculate True Positives (TP) and False Positives (FP)
-    TP = (
-        (label_test == 1) & (output_thresholded == 1)
-    ).sum()  # Both label and prediction are 1
-    CONSOLE.print(f"TP: {TP}")
-    FN = (
-        (label_test == 1) & (output_thresholded == 0)
-    ).sum()  # Label is 1, prediction is 0
-    CONSOLE.print(f"FN: {FN}")
-    FP = (
-        (label_test == 0) & (output_thresholded == 1)
-    ).sum()  # Label is 0, prediction is 1
-    CONSOLE.print(f"FP: {FP}")
-    TN = (
-        (label_test == 0) & (output_thresholded == 0)
-    ).sum()  # Both label and prediction are 0
-    CONSOLE.print(f"TN: {TN}")
-
-    # Calculate Precision/PPV
-    precision = TP / (TP + FP) if (TP + FP) != 0 else 0  # Avoid division by zero
-    recall = TP / (TP + FN) if (TP + FN) != 0 else 0  # Avoid division by zero
-    f1_score = (
-        2 * (precision * recall) / (precision + recall)
-        if (precision + recall) != 0
-        else 0
-    )  # Avoid division by zero
+    _auroc_score, _ap_score, prec_score, rec_score, f1 = data_type.get_eval_fn()
+    precision = prec_score(label_test, output_thresholded)
+    recall = rec_score(label_test, output_thresholded)
+    f1_score = f1(label_test, output_thresholded)
 
     CONSOLE.print(f"Precision/PPV: {precision:.4f}")
+    CONSOLE.print(f"Recall score: {recall:.4f}")
     CONSOLE.print(f"F1 score: {f1_score:.4f}")
 
     ### saving results
     df_test_acc = pd.DataFrame({"Testing Pre": [precision]})
     df_test_acc.to_csv(os.path.join(result_path, "Testing_best_Pre.csv"), index=False)
 
+    df_test_acc = pd.DataFrame({"Testing recall": [recall]})
+    df_test_acc.to_csv(os.path.join(result_path, "Testing_best_Rec.csv"), index=False)
+
     if show_auc_plots:
-        model_str = model_type if not bert_use_temporal_conv else model_type + "_TCN"
+        model_str = (
+            str(model_type) if not bert_use_temporal_conv else str(model_type) + "_TCN"
+        )
         model_str = model_str + f"_seed{seed_everything}"
 
         fig = auc_charts(label_test, output_test, model_str)
@@ -664,117 +685,4 @@ def main(
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser()
-
-    parser.add_argument(
-        "--model_type",
-        "-m",
-        default="Transformer",
-        choices=["RNN", "LSTM", "Transformer", "BERT_EHR", "BERT", "TCN"],
-        type=str,
-    )
-    parser.add_argument(
-        "--data_type",
-        "-d",
-        default="EHR",
-        choices=["EHR", "Report", "EHRAndReport", "EHRAndEmbeddings"],
-        type=str,
-    )
-
-    parser.add_argument(
-        "--data_dir", default=DATA_DIR, type=str, help="Path to data directory root"
-    )
-    parser.add_argument(
-        "--checkpoints_dir",
-        default=CHECKPOINTS_DIR,
-        type=str,
-        help="Path to checkpoints directory root",
-    )
-
-    parser.add_argument(
-        "--batch_size", "--bz", default=64, type=int, help="Mini-batch size"
-    )
-    parser.add_argument(
-        "--hidden_size", "--hz", default=32, type=int, help="Hidden size (RNN/LSTM)"
-    )
-    parser.add_argument(
-        "--num_layers", "-l", default=3, type=int, help="Number of layers (RNN/LSTM)"
-    )
-    parser.add_argument(
-        "--num_epoch", "-e", default=1, type=int, help="Number of epochs"
-    )
-    parser.add_argument("--lr", default=5e-3, type=float, help="Learning rate")
-
-    parser.add_argument(
-        "--trans_input_dim",
-        default=512,
-        type=int,
-        help="Custom transformer input dimensionality",
-    )
-    parser.add_argument(
-        "--trans_n_heads",
-        default=8,
-        type=int,
-        help="Transformer number of attention heads",
-    )
-    parser.add_argument(
-        "--trans_ff_dim",
-        default=2048,
-        type=int,
-        help="Transformer feedforward network dimensionality",
-    )
-    parser.add_argument(
-        "--trans_dropout",
-        default=0.1,
-        type=float,
-        help="Transformer dropout probability",
-    )
-    parser.add_argument(
-        "--trans_num_layers", default=12, type=int, help="Transformer number of layers"
-    )
-
-    parser.add_argument(
-        "--output_l1_dim",
-        default=256,
-        type=int,
-        help="Final FF layer(1) dimensionality",
-    )
-    parser.add_argument(
-        "--output_l2_dim",
-        default=128,
-        type=int,
-        help="Final FF layer(2) dimensionality",
-    )
-    parser.add_argument(
-        "--output_l3_dim",
-        default=1,
-        type=int,
-        help="Classification layer dimensionality",
-    )
-
-    parser.add_argument(
-        "--bert_use_temporal_conv",
-        action="store_true",
-        help="BERT_EHR: Whether to use a temporal convolution",
-    )
-    parser.add_argument(
-        "--bert_model_str",
-        default="google-bert/bert-base-uncased",
-        type=str,
-        help="BERT: Huggingface model str",
-    )
-    parser.add_argument(
-        "--seed_everything",
-        default=3407,
-        type=int,
-        help="Seed variable for RNG operations",
-    )
-    parser.add_argument(
-        "--show_auc_plots",
-        action="store_true",
-        help="Whether to show AUC plots (blocking).",
-    )
-
-    args = parser.parse_args()
-
-    main(**vars(args))
+    auto_cli(main, as_positional=False)

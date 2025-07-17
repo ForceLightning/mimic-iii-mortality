@@ -14,9 +14,16 @@ from torch.utils.data import Dataset
 from transformers import AutoModel, AutoTokenizer, BertModel, BertTokenizer
 
 
+class DatasetType(Enum):
+    EHR = auto()
+    REPORT = auto()
+    EHR_AND_REPORT = auto()
+    BCB_EMB_EHR = auto()
+
+
 # define and create dataset (using processed EHR from MIMIC III data)
 class EHRDataset(Dataset[tuple[Tensor, Tensor]]):
-    def __init__(self, root_dir):
+    def __init__(self, root_dir: str):
         self.ehr_dir = os.path.join(root_dir, "EHR/")
         label_path = os.path.join(root_dir, "labels.csv")
 
@@ -124,6 +131,47 @@ class EHRAndReportDataset(Dataset[tuple[Tensor, str, Tensor, str]]):
     def __remove_spaces_from_report(self, reports: list[str]) -> list[str]:
         reports = list(map(lambda x: x[::2], reports))
         return reports
+
+
+class EHRAndBioclinicalBERTEmbeddingsDataset(Dataset[tuple[Tensor, Tensor, Tensor]]):
+    def __init__(self, root_dir: str) -> None:
+        super().__init__()
+        self.ehr_dir = os.path.join(root_dir, "EHR")
+        self.emb_dir = os.path.join(root_dir, "Embeddings")
+
+        label_path = os.path.join(root_dir, "labels.csv")
+        self.labels_df = pd.read_csv(label_path, index_col=False)
+        self.stay_ids = self.labels_df["stay"].astype(str)
+        self.labels = self.labels_df["y_true"].astype(int)
+
+    def __len__(self) -> int:
+        return len(self.labels_df)
+
+    @override
+    def __getitem__(self, index) -> tuple[Tensor, Tensor, Tensor]:
+        stay_id: str = self.stay_ids[index]  # pyright: ignore
+
+        # Get report embeddings.
+        emb_path = os.path.join(self.emb_dir, stay_id)
+        emb_df = (
+            pd.read_csv(emb_path, index_col=False, encoding="utf-8")
+            .apply(pd.to_numeric, errors="coerce")
+            .ffill()
+        )
+        emb_tensor = torch.tensor(emb_df.values, dtype=torch.float32)
+
+        # Get EHR data.
+        ehr_path = os.path.join(self.ehr_dir, stay_id)
+        ehr_df = (
+            pd.read_csv(ehr_path, index_col=False, encoding="utf-8")
+            .apply(pd.to_numeric, errors="coerce")
+            .ffill()
+        )
+        ehr_tensor = torch.tensor(ehr_df.values, dtype=torch.float32)
+
+        label = torch.tensor(self.labels.iloc[index], dtype=torch.float32)
+
+        return ehr_tensor, emb_tensor, label
 
 
 # define 1 linear layer class
@@ -525,15 +573,15 @@ class BERT_EHR(nn.Module):
         self.temporal_conv = (
             # nn.Conv1d(static_size, static_size, kernel_size=48, stride=1, padding=0)
             nn.Sequential(
-                nn.Conv1d(static_size, static_size, kernel_size=3),
+                nn.Conv1d(static_size, static_size, kernel_size=3, stride=3),
                 nn.ReLU(inplace=True),
-                nn.Conv1d(static_size, static_size, kernel_size=2),
+                nn.Conv1d(static_size, static_size, kernel_size=2, stride=2),
                 nn.ReLU(inplace=True),
-                nn.Conv1d(static_size, static_size, kernel_size=2),
+                nn.Conv1d(static_size, static_size, kernel_size=2, stride=2),
                 nn.ReLU(inplace=True),
-                nn.Conv1d(static_size, static_size, kernel_size=2),
+                nn.Conv1d(static_size, static_size, kernel_size=2, stride=2),
                 nn.ReLU(inplace=True),
-                nn.Conv1d(static_size, static_size, kernel_size=2),
+                nn.Conv1d(static_size, static_size, kernel_size=2, stride=2),
                 nn.ReLU(inplace=True),
             )
             if temporal_conv
@@ -564,8 +612,8 @@ class BERT_EHR(nn.Module):
         # If we use a temporal conv net, perform temp conv. Otherwise take the mean
         # over the temporal axis of the static features.
         x_static = (
-            self.temporal_conv(x_static).squeeze(dim=1)
-            if isinstance(self.temporal_conv, nn.Conv1d)
+            self.temporal_conv(x_static.permute(0, 2, 1)).squeeze(dim=2)
+            if isinstance(self.temporal_conv, nn.Sequential)
             else x_static.mean(dim=1, keepdim=False)
         )
         # Concatenate BERT's output and the static features.
@@ -589,6 +637,86 @@ class BERT_EHR(nn.Module):
     @torch.no_grad()
     def predict(self, x_test: list[str], x_static: Tensor) -> Tensor:
         out = self.forward(x_test, x_static)
+        return out.sigmoid()
+
+
+class BERTEmbeddings_EHR_TCN(nn.Module):
+    def __init__(
+        self,
+        static_size: int = 76,
+        emb_dim: int = 512,
+        dropout_p: float = 0.5,
+        n_fc_1: int = 256,
+        n_fc_2: int = 48,
+    ) -> None:
+        super().__init__()
+
+        self.ehr_tcn = nn.Sequential(
+            nn.Conv1d(static_size, static_size, kernel_size=3, stride=3),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(static_size, static_size, kernel_size=2, stride=2),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(static_size, static_size, kernel_size=2, stride=2),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(static_size, static_size, kernel_size=2, stride=2),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(static_size, static_size, kernel_size=2, stride=2),
+            nn.ReLU(inplace=True),
+        )
+
+        self.emb_tcn = nn.Sequential(
+            nn.Conv1d(emb_dim, emb_dim, kernel_size=3, stride=3),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(emb_dim, emb_dim, kernel_size=2, stride=2),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(emb_dim, emb_dim, kernel_size=2, stride=2),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(emb_dim, emb_dim, kernel_size=2, stride=2),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(emb_dim, emb_dim, kernel_size=2, stride=2),
+            nn.ReLU(inplace=True),
+        )
+
+        self.dropout = nn.Dropout(p=dropout_p)
+
+        # Batch-norm
+        self.dropout = nn.Dropout(p=dropout_p)
+
+        # Batch-norm
+        self.batchnorm_1 = nn.BatchNorm1d(n_fc_1, momentum=0.1)
+        self.batchnorm_2 = nn.BatchNorm1d(n_fc_2, momentum=0.1)
+
+        # Define the FC layers
+        self.linear_1 = nn.Linear(emb_dim + static_size, n_fc_1)
+        self.relu = nn.ReLU()
+        self.linear_2 = nn.Linear(n_fc_1, n_fc_2)
+        self.classifier = nn.Linear(n_fc_2, 1)
+
+    def forward(self, x_ehr: Tensor, x_emb: Tensor) -> Tensor:
+        ehr_sqz = self.ehr_tcn(x_ehr.permute(0, 2, 1)).squeeze(dim=2)
+        emb_sqz = self.emb_tcn(x_emb.permute(0, 2, 1)).squeeze(dim=2)
+
+        # Concatenate temporally convolved EHR and BioclinicalBERT embeddings
+        inputs = torch.cat([ehr_sqz, emb_sqz], dim=1)
+
+        # Pass through 1st FC layer.
+        out_1 = self.relu(self.linear_1(inputs))
+        out_1 = self.batchnorm_1(out_1)
+        out_1 = self.dropout(out_1)
+
+        # Pass through 2nd FC layer.
+        out_2 = self.relu(self.linear_2(out_1))
+        out_2 = self.batchnorm_2(out_2)
+        out_2 = self.dropout(out_2)
+
+        # Pass through classifier output layer.
+        out = self.classifier(out_2)
+
+        return out
+
+    @torch.no_grad()
+    def predict(self, x_ehr: Tensor, x_emb: Tensor) -> Tensor:
+        out = self.forward(x_ehr, x_emb)
         return out.sigmoid()
 
 

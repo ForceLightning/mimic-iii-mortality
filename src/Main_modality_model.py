@@ -27,9 +27,11 @@ from torch.utils.data import DataLoader
 from Model_n_Dataset import (
     BERT,
     BERT_EHR,
+    BERTEmbeddings_EHR_TCN,
     CustomLSTM,
     CustomRNN,
     CustomTransformer,
+    EHRAndBioclinicalBERTEmbeddingsDataset,
     EHRAndReportDataset,
     EHRDataset,
     Model_head_1_layer,
@@ -98,12 +100,22 @@ def train_epoch(
                     label = label.to(DEVICE).unsqueeze(1)
 
                     output = model(data)
+
                 case "BERT_EHR", "EHRAndReport":
                     ehr, report, label, _stay_id = data_tuple
                     ehr = ehr.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
 
                     output = model(report, ehr)
+
+                case "TCN", "EHRAndEmbeddings":
+                    ehr, emb, label = data_tuple
+                    ehr = ehr.to(DEVICE)
+                    emb = emb.to(DEVICE)
+                    label = label.to(DEVICE).unsqueeze(1)
+
+                    output = model(ehr, emb)
+
                 case _, _:
                     raise NotImplementedError(
                         f"Combination of {model_type}, {data_type} not implemented!"
@@ -148,20 +160,33 @@ def validate_epoch(
     epoch_loss = 0.0
     progress.console.print("start testing")
     for i, data_tuple in enumerate(test_loader):
-        match (model_type, data_type):
-            case "RNN" | "LSTM" | "Transformer" | "BERT", "EHR" | "Report":
+        match (model, data_type):
+            case (
+                CustomRNN() | CustomLSTM() | CustomTransformer() | BERT(),
+                "EHR" | "Report",
+            ):
                 data, label = data_tuple
                 if isinstance(data, Tensor):
                     data = data.to(DEVICE)
                 label = label.to(DEVICE).unsqueeze(1)
 
-                output = model(data)
-            case "BERT_EHR", "EHRAndReport":
+                output = model(data)  # pyright: ignore
+            case BERT_EHR(), "EHRAndReport":
                 ehr, report, label, _stay_id = data_tuple
                 ehr = ehr.to(DEVICE)
                 label = label.to(DEVICE).unsqueeze(1)
 
+                assert isinstance(model, BERT_EHR)
                 output = model(report, ehr)
+
+            case BERTEmbeddings_EHR_TCN(), "EHRAndEmbeddings":
+                ehr, emb, label = data_tuple
+                ehr = ehr.to(DEVICE)
+                emb = emb.to(DEVICE)
+                label = label.to(DEVICE).unsqueeze(1)
+
+                output = model(ehr, emb)
+
             case _, _:
                 raise NotImplementedError(
                     f"Combination of {model_type}, {data_type} not implemented!"
@@ -207,21 +232,33 @@ def test(
         ### testing
         task = progress.add_task("Test batches", total=len(test_loader))
         for data_tuple in test_loader:
-            match (model_type, data_type):
-                case "RNN" | "LSTM" | "Transformer" | "BERT", "EHR" | "Report":
+            match (model, data_type):
+                case (
+                    CustomRNN() | CustomLSTM() | CustomTransformer() | BERT(),
+                    "EHR" | "Report",
+                ):
                     data, label = data_tuple
                     if isinstance(data, Tensor):
                         data = data.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
 
-                    output = model(data)
-                case "BERT_EHR", "EHRAndReport":
+                    output = model.predict(data)  # pyright: ignore
+                case BERT_EHR(), "EHRAndReport":
                     ehr, report, label, _stay_id = data_tuple
                     ehr = ehr.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
 
                     assert isinstance(model, BERT_EHR)
                     output = model.predict(report, ehr)
+
+                case BERTEmbeddings_EHR_TCN(), "EHRAndEmbeddings":
+                    ehr, emb, label = data_tuple
+                    ehr = ehr.to(DEVICE)
+                    emb = emb.to(DEVICE)
+                    label = label.to(DEVICE).unsqueeze(1)
+
+                    output = model.predict(ehr, emb)
+
                 case _, _:
                     raise NotImplementedError(
                         f"Combination of {model_type}, {data_type} not implemented!"
@@ -271,7 +308,7 @@ def train_and_validate(
     scaler = GradScaler()  # Automatic Mixed Precision
 
     # training loop
-    with Progress(refresh_per_second=1, speed_estimate_period=30) as progress:
+    with Progress(auto_refresh=False) as progress:
         epoch_task = progress.add_task("[green]Epochs", total=num_epochs)
         for epoch in range(num_epochs):
             # start training
@@ -320,14 +357,14 @@ def train_and_validate(
             if auroc > best_auroc:
                 best_auroc = auroc
                 best_model = copy.deepcopy(model.state_dict())
-            progress.advance(epoch_task)
+            progress.advance(epoch_task, 1)
 
     return best_model
 
 
 def main(
-    model_type: Literal["RNN", "LSTM", "Transformer", "BERT", "BERT_EHR"],
-    data_type: Literal["EHR", "Report", "EHRAndReport"],
+    model_type: Literal["RNN", "LSTM", "Transformer", "BERT", "BERT_EHR", "TCN"],
+    data_type: Literal["EHR", "Report", "EHRAndReport", "EHRAndEmbeddings"],
     data_dir: str = DATA_DIR,
     checkpoints_dir: str = CHECKPOINTS_DIR,
     batch_size: int = 64,
@@ -351,15 +388,19 @@ def main(
         "emilyalsentzer/Bio_ClinicalBERT",
     ] = "google-bert/bert-base-uncased",
     seed_everything: int = SEED_CUS,
+    show_auc_plots: bool = False,
 ):
     set_seed(seed_everything)
     # define train and test dataset
-    if data_type == "EHR":
-        Dataset = EHRDataset
-    elif data_type == "Report":
-        Dataset = ReportDataset
-    elif data_type == "EHRAndReport":
-        Dataset = EHRAndReportDataset
+    match data_type:
+        case "EHR":
+            Dataset = EHRDataset
+        case "Report":
+            Dataset = ReportDataset
+        case "EHRAndReport":
+            Dataset = EHRAndReportDataset
+        case "EHRAndEmbeddings":
+            Dataset = EHRAndBioclinicalBERTEmbeddingsDataset
 
     assert Dataset is not None
 
@@ -427,6 +468,7 @@ def main(
                 ),
             )
             model_name_list = ["Model_RNN", "Model_head_linear"]
+
         case "LSTM", EHRDataset() | ReportDataset():
             model_sequential = nn.Sequential(
                 CustomLSTM(train_dataset[0][0].shape[-1], hidden_size, num_layers),
@@ -438,6 +480,7 @@ def main(
                 ),
             )
             model_name_list = ["Model_LSTM", "Model_head_linear"]
+
         case (
             "Transformer",
             EHRDataset() | ReportDataset(),
@@ -455,6 +498,7 @@ def main(
                 Model_head_1_layer(trans_input_dim, output_l3_dim),
             )
             model_name_list = ["Model_linear", "Model_Transformer", "Model_head_linear"]
+
         case "BERT", ReportDataset():
             model_sequential = BERT(
                 bert_model_str,
@@ -463,7 +507,9 @@ def main(
                 output_l2_dim,
             )
             model_name_list = [model_type_detailed]
+
         case "BERT_EHR", EHRAndReportDataset():
+            print(model_type, train_dataset[0][0].shape)
             model_sequential = BERT_EHR(
                 train_dataset[0][0].shape[-1],
                 trans_dropout,
@@ -471,8 +517,18 @@ def main(
                 output_l2_dim,
                 bert_use_temporal_conv,
             )
-
             model_name_list = [model_type_detailed]
+
+        case "TCN", EHRAndBioclinicalBERTEmbeddingsDataset():
+            model_sequential = BERTEmbeddings_EHR_TCN(
+                train_dataset[0][0].shape[-1],
+                train_dataset[0][1].shape[-1],
+                trans_dropout,
+                output_l1_dim,
+                output_l2_dim,
+            )
+            model_name_list = [model_type_detailed]
+
         case _, _:
             raise NotImplementedError(
                 f"Combination of {model_type}, {data_type} is not implemented!"
@@ -596,13 +652,15 @@ def main(
     df_test_acc = pd.DataFrame({"Testing Pre": [precision]})
     df_test_acc.to_csv(os.path.join(result_path, "Testing_best_Pre.csv"), index=False)
 
-    # model_str = model_type if not bert_use_temporal_conv else model_type + "_TCN"
-    # model_str = model_str + f"_seed{seed_everything}"
-    #
-    # fig = auc_charts(label_test, output_test, model_str)
-    # fig.savefig(
-    #     f"./output/{model_str}.png",
-    # )
+    if show_auc_plots:
+        model_str = model_type if not bert_use_temporal_conv else model_type + "_TCN"
+        model_str = model_str + f"_seed{seed_everything}"
+
+        fig = auc_charts(label_test, output_test, model_str)
+        fig.savefig(
+            f"./output/{model_str}.png",
+        )
+        plt.show(block=True)
 
 
 if __name__ == "__main__":
@@ -612,14 +670,14 @@ if __name__ == "__main__":
         "--model_type",
         "-m",
         default="Transformer",
-        choices=["RNN", "LSTM", "Transformer", "BERT_EHR", "BERT"],
+        choices=["RNN", "LSTM", "Transformer", "BERT_EHR", "BERT", "TCN"],
         type=str,
     )
     parser.add_argument(
         "--data_type",
         "-d",
         default="EHR",
-        choices=["EHR", "Report", "EHRAndReport"],
+        choices=["EHR", "Report", "EHRAndReport", "EHRAndEmbeddings"],
         type=str,
     )
 
@@ -710,6 +768,11 @@ if __name__ == "__main__":
         default=3407,
         type=int,
         help="Seed variable for RNG operations",
+    )
+    parser.add_argument(
+        "--show_auc_plots",
+        action="store_true",
+        help="Whether to show AUC plots (blocking).",
     )
 
     args = parser.parse_args()

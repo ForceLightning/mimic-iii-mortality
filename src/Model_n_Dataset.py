@@ -27,6 +27,7 @@ class DatasetType(Enum):
     EHR = auto()
     REPORT = auto()
     EHR_AND_REPORT = auto()
+    BCB_EMB = auto()
     BCB_EMB_EHR = auto()
     PHENOTYPE_BCB_EMB = auto()
     PHENOTYPE_BCB_EMB_EHR = auto()
@@ -38,6 +39,7 @@ class DatasetType(Enum):
                 | DatasetType.REPORT
                 | DatasetType.EHR_AND_REPORT
                 | DatasetType.BCB_EMB_EHR
+                | DatasetType.BCB_EMB
             ):
                 return "train_with_raw_report", "test_with_raw_report"
             case DatasetType.PHENOTYPE_BCB_EMB | DatasetType.PHENOTYPE_BCB_EMB_EHR:
@@ -54,7 +56,7 @@ class DatasetType(Enum):
                 return ReportDataset
             case DatasetType.EHR_AND_REPORT:
                 return EHRAndReportDataset
-            case DatasetType.PHENOTYPE_BCB_EMB:
+            case DatasetType.BCB_EMB | DatasetType.PHENOTYPE_BCB_EMB:
                 return BioclinicalBERTEmbeddingsDataset
             case DatasetType.BCB_EMB_EHR | DatasetType.PHENOTYPE_BCB_EMB_EHR:
                 return EHRAndBioclinicalBERTEmbeddingsDataset
@@ -65,6 +67,7 @@ class DatasetType(Enum):
                 DatasetType.EHR
                 | DatasetType.REPORT
                 | DatasetType.EHR_AND_REPORT
+                | DatasetType.BCB_EMB
                 | DatasetType.BCB_EMB_EHR
             ):
                 return (
@@ -95,7 +98,7 @@ class ModelType(Enum):
     BERT = auto()
     BERT_EMB = auto()
     BERT_EHR = auto()
-    TCN = auto()
+    BERT_EMB_EHR_TCN = auto()
 
     def __str__(self) -> str:
         return str(self.name)
@@ -155,21 +158,31 @@ class ReportDataset(Dataset[tuple[str, Tensor]]):
     def __getitem__(self, index: int) -> tuple[str, Tensor]:
         stay_id = self.stay_ids[index]
 
-        report_path = os.path.join(self.report_dir, f"{stay_id}")
-        report_df = pd.read_csv(report_path, index_col=False, encoding="utf-8").ffill()
-        if "phenotyping" in self.root_dir:
-            reports = (
-                report_df.values.tolist()
-                if not self.drop_duplicates
-                else report_df.drop_duplicates().values.tolist()
+        if "mimic-iv" in self.root_dir:
+            report_path = os.path.join(
+                self.report_dir, os.path.splitext(str(stay_id))[0] + ".txt"
             )
+            with open(report_path, "r", encoding="utf-8") as f:
+                report = f.read()
+                reports = [report] * 48
         else:
-            reports = (
-                report_df["Note"].to_list()
-                if not self.drop_duplicates
-                else report_df["Note"].drop_duplicates().to_list()
-            )
-        reports = self.__remove_spaces_from_report(reports)
+            report_path = os.path.join(self.report_dir, str(stay_id))
+            report_df = pd.read_csv(
+                report_path, index_col=False, encoding="utf-8"
+            ).ffill()
+            if "phenotyping" in self.root_dir:
+                reports = (
+                    report_df.values.tolist()
+                    if not self.drop_duplicates
+                    else report_df.drop_duplicates().values.tolist()
+                )
+            else:
+                reports = (
+                    report_df["Note"].to_list()
+                    if not self.drop_duplicates
+                    else report_df["Note"].drop_duplicates().to_list()
+                )
+            reports = self.__remove_spaces_from_report(reports)
         reports = " [SEP] ".join(reports)
         text = "[CLS] " + reports
 
@@ -209,10 +222,23 @@ class EHRAndReportDataset(Dataset[tuple[Tensor, str, Tensor, str]]):
         stay_id: str = self.stay_ids[index]  # pyright: ignore
 
         # Get report.
-        report_path = os.path.join(self.report_dir, stay_id)
-        report_df = pd.read_csv(report_path, index_col=False, encoding="utf-8").ffill()
-        reports = report_df["Note"].drop_duplicates().to_list()
-        reports = self.__remove_spaces_from_report(reports)
+        if "mimic-iv" in self.report_dir:
+            report_path = os.path.join(
+                self.report_dir, os.path.splitext(str(stay_id))[0] + ".txt"
+            )
+            with open(report_path, "r", encoding="utf-8") as f:
+                report = f.read()
+                reports = [report]
+        else:
+            report_path = os.path.join(self.report_dir, str(stay_id))
+            report_df = pd.read_csv(
+                report_path, index_col=False, encoding="utf-8"
+            ).ffill()
+            if "phenotyping" in self.report_dir:
+                reports = report_df.drop_duplicates().values.tolist()
+            else:
+                reports = report_df["Note"].drop_duplicates().to_list()
+            reports = self.__remove_spaces_from_report(reports)
         reports = " [SEP] ".join(reports)
         text = "[CLS] " + reports
 

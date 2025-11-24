@@ -10,8 +10,8 @@ wheels/
 .venv
 
 # Data and checkpoints dir
-data
-checkpoints
+data**
+checkpoints**
 output
 
 # Env file

@@ -8,7 +8,8 @@ from typing import Literal
 # Third-Party
 from jsonargparse import auto_cli
 from rich.console import Console
-from rich.progress import Progress, TaskID
+from rich.progress import Progress, SpinnerColumn, TaskID, TimeElapsedColumn
+from rich.table import Table
 
 # Scientific Libraries
 import numpy as np
@@ -123,13 +124,20 @@ def train_epoch(
 
                     output = model(report, ehr)
 
-                case ModelType.TCN, DatasetType.BCB_EMB_EHR:
+                case ModelType.BERT_EMB_EHR_TCN, DatasetType.BCB_EMB_EHR:
                     ehr, emb, label = data_tuple
                     ehr = ehr.to(DEVICE)
                     emb = emb.to(DEVICE)
                     label = label.to(DEVICE).unsqueeze(1)
 
                     output = model(ehr, emb)
+
+                case ModelType.BERT_EMB, DatasetType.BCB_EMB:
+                    emb, label = data_tuple
+                    emb = emb.to(DEVICE)
+                    label = label.to(DEVICE).unsqueeze(1)
+
+                    output = model(emb)
 
                 case ModelType.BERT_EMB, DatasetType.PHENOTYPE_BCB_EMB:
                     data, label = data_tuple
@@ -161,7 +169,9 @@ def train_epoch(
         current_loss = loss.detach().cpu().item()
         epoch_loss += current_loss
 
-        progress.console.print(f"Epoch: {epoch + 1}, Batch: {i}, Loss: {current_loss}")
+        progress.console.print(
+            f"Epoch: {epoch + 1}, Batch: {i}, Loss: {current_loss:.2E}"
+        )
         progress.advance(epoch_task, num_samples)
         progress.advance(batch_task)
 
@@ -215,13 +225,20 @@ def validate_epoch(
 
                 output = model(report, ehr)
 
-            case ModelType.TCN, DatasetType.BCB_EMB_EHR:
+            case ModelType.BERT_EMB_EHR_TCN, DatasetType.BCB_EMB_EHR:
                 ehr, emb, label = data_tuple
                 ehr = ehr.to(DEVICE)
                 emb = emb.to(DEVICE)
                 label = label.to(DEVICE).unsqueeze(1)
 
                 output = model(ehr, emb)
+
+            case ModelType.BERT_EMB, DatasetType.BCB_EMB:
+                emb, label = data_tuple
+                emb = emb.to(DEVICE)
+                label = label.to(DEVICE).unsqueeze(1)
+
+                output = model(emb)
 
             case ModelType.BERT_EMB, DatasetType.PHENOTYPE_BCB_EMB:
                 data, label = data_tuple
@@ -271,15 +288,19 @@ def test(
     model_path: str,
     model_name_list: list[str],
 ):
-    with Progress() as progress:
+    with Progress(
+        SpinnerColumn(), *Progress.get_default_columns(), TimeElapsedColumn()
+    ) as progress:
         output_test = []
         label_test = []
 
         ### load best model
         model.load_state_dict(
-            torch.load(os.path.join(model_path, f"{"_".join(model_name_list)}.ckpt"))
+            torch.load(
+                os.path.join(model_path, f"{"_".join(model_name_list)}.ckpt"),
+                map_location=DEVICE,
+            )
         )
-        model.to(DEVICE)
         model.eval()
 
         ### testing
@@ -309,7 +330,14 @@ def test(
 
                     output = model(report, ehr)
 
-                case ModelType.TCN, DatasetType.BCB_EMB_EHR:
+                case ModelType.BERT_EMB, DatasetType.BCB_EMB:
+                    emb, label = data_tuple
+                    emb = emb.to(DEVICE)
+                    label = label.to(DEVICE).unsqueeze(1)
+
+                    output = model(emb)
+
+                case ModelType.BERT_EMB_EHR_TCN, DatasetType.BCB_EMB_EHR:
                     ehr, emb, label = data_tuple
                     ehr = ehr.to(DEVICE)
                     emb = emb.to(DEVICE)
@@ -356,9 +384,6 @@ def test(
         auroc = roc_auc(label_test, output_test)
         auprc = ap_score(label_test, output_test)
 
-        progress.console.print(f"AUROC: {auroc:.4f}")
-        progress.console.print(f"AUPRC: {auprc:.4f}")
-
         progress.stop()
 
     return output_test, label_test, auroc, auprc
@@ -383,7 +408,9 @@ def train_and_validate(
     scaler = GradScaler()  # Automatic Mixed Precision
 
     # training loop
-    with Progress() as progress:
+    with Progress(
+        SpinnerColumn(), *Progress.get_default_columns(), TimeElapsedColumn()
+    ) as progress:
         batch_size = train_loader.batch_size if train_loader.batch_size else 16
         total_train_samples = (
             len(train_loader.dataset)  # pyright: ignore[reportArgumentType]
@@ -521,6 +548,7 @@ def main(
             16
             if data_type
             in [
+                DatasetType.BCB_EMB,
                 DatasetType.BCB_EMB_EHR,
                 DatasetType.PHENOTYPE_BCB_EMB,
                 DatasetType.PHENOTYPE_BCB_EMB_EHR,
@@ -538,6 +566,7 @@ def main(
             16
             if data_type
             in [
+                DatasetType.BCB_EMB,
                 DatasetType.BCB_EMB_EHR,
                 DatasetType.PHENOTYPE_BCB_EMB,
                 DatasetType.PHENOTYPE_BCB_EMB_EHR,
@@ -656,7 +685,7 @@ def main(
             )
             model_name_list = [model_type_detailed]
 
-        case ModelType.TCN, EHRAndBioclinicalBERTEmbeddingsDataset():
+        case ModelType.BERT_EMB_EHR_TCN, EHRAndBioclinicalBERTEmbeddingsDataset():
             model_sequential = BERTEmbeddings_EHR_TCN(
                 train_dataset[0][0].shape[-1],
                 train_dataset[0][1].shape[-1],
@@ -727,7 +756,9 @@ def main(
         torch.save(model_sequential.state_dict(), ckpt_path)
     else:
         CONSOLE.print(f"Loading model weights from {os.path.normpath(ckpt_path)}")
-        model_sequential.load_state_dict(torch.load(ckpt_path, weights_only=True))
+        model_sequential.load_state_dict(
+            torch.load(ckpt_path, weights_only=True, map_location=DEVICE)
+        )
 
     # define testing process after training completion and model saving
     gc.collect()
@@ -760,6 +791,12 @@ def main(
         output_test >= best_threshold
     ).int()  # values > 0.1 → 1, else → 0
 
+    table = Table(title=f"{model_type_detailed} metrics")
+    table.add_column("AUROC", justify="right", style="cyan", no_wrap=True)
+    table.add_column("AURPC", justify="right", style="cyan", no_wrap=True)
+    table.add_column("AURPC", justify="right", style="cyan", no_wrap=True)
+    accuracy = 0
+
     # calculate accuracy
     if num_classes == 1:
         count = 0
@@ -767,25 +804,47 @@ def main(
             if output_thresholded[i] == label_test[i]:
                 count = count + 1
 
+        accuracy = count / label_test.size(dim=0)
+
         ### print results
-        CONSOLE.print(
-            f"Testing accuracy is {100 * (count / label_test.size(dim=0)):0.2f}%"
-        )
+        # CONSOLE.print(
+        #     f"Testing accuracy is {100 * (count / label_test.size(dim=0)):0.2f}%"
+        # )
+        table.add_column("Accuracy", justify="right", style="cyan", no_wrap=True)
+        table.add_column("PPV", justify="right", style="cyan", no_wrap=True)
 
         ### saving results
         df_test_acc = pd.DataFrame({"Testing Acc": [count / label_test.size(dim=0)]})
         df_test_acc.to_csv(
             os.path.join(result_path, "Testing_best_Acc.csv"), index=False
         )
+    else:
+        table.add_column("PPV", justify="right", style="cyan", no_wrap=True)
+        table.add_column("Recall", justify="right", style="cyan", no_wrap=True)
 
     _auroc_score, _ap_score, prec_score, rec_score, f1 = data_type.get_eval_fn()
     precision = prec_score(label_test, output_thresholded)
     recall = rec_score(label_test, output_thresholded)
     f1_score = f1(label_test, output_thresholded)
 
-    CONSOLE.print(f"Precision/PPV: {precision:.4f}")
-    CONSOLE.print(f"Recall score: {recall:.4f}")
-    CONSOLE.print(f"F1 score: {f1_score:.4f}")
+    if num_classes == 1:
+        table.add_row(
+            f"{auroc:.4f}",
+            f"{auprc:.4f}",
+            f"{accuracy:.4f}",
+            f"{precision:.4f}",
+            f"{f1_score:.4f}",
+        )
+    else:
+        table.add_row(
+            f"{auroc:.4f}",
+            f"{auprc:.4f}",
+            f"{precision:.4f}",
+            f"{recall:.4f}",
+            f"{f1_score:.4f}",
+        )
+
+    CONSOLE.print(table)
 
     ### saving results
     df_test_acc = pd.DataFrame({"Testing Pre": [precision]})

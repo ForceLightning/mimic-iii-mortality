@@ -228,10 +228,10 @@ function loop_3407_3409_params() {
 # loop_3407_3409 phenotyping_BERT_EHR
 
 # MIMIC-IV
+# loop_3407_3409_params BERT_custom_model_MIMIC_IV "google-bert/bert-base-uncased"
 # TODO: Run these
 #
-# loop_3407_3409_params BERT_custom_model_MIMIC_IV "google-bert/bert-base-uncased"
-# loop_3407_3409_params BERT_custom_model_MIMIC_IV "dmis-lab/biobert-v1.1"
+loop_3407_3409_params BERT_custom_model_MIMIC_IV "dmis-lab/biobert-v1.1"
 # loop_3407_3409_params BERT_custom_model_MIMIC_IV "emilyalsentzer/Bio_ClinicalBERT"
 # loop_3407_3409 BERT_EHR_MIMIC_IV
 # loop_3407_3409 BioclinicalBERT_Embeddings_TCN_MIMIC_IV

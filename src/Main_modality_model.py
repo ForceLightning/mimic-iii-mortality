@@ -8,7 +8,14 @@ from typing import Literal
 # Third-Party
 from jsonargparse import auto_cli
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TaskID, TimeElapsedColumn
+from rich.progress import (
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskID,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.table import Table
 
 # Scientific Libraries
@@ -83,13 +90,14 @@ def train_epoch(
     optimizer: Optimizer,
     criterion: nn.modules.loss._Loss,
     scaler: GradScaler,
-    epoch: int,
     progress: Progress,
     epoch_task: TaskID,
 ):
     epoch_loss = 0.0
     num_batches = len(train_loader)
-    batch_task = progress.add_task("[blue]Training Mini-batches...", total=num_batches)
+    batch_task = progress.add_task(
+        "[blue]Training Mini-batches...", total=num_batches, loss=float("nan")
+    )
     model.train()
     for i, data_tuple in enumerate(train_loader):
         optimizer.zero_grad()
@@ -169,11 +177,8 @@ def train_epoch(
         current_loss = loss.detach().cpu().item()
         epoch_loss += current_loss
 
-        progress.console.print(
-            f"Epoch: {epoch + 1}, Batch: {i}, Loss: {current_loss:.2E}"
-        )
-        progress.advance(epoch_task, num_samples)
-        progress.advance(batch_task)
+        progress.update(epoch_task, advance=num_samples)
+        progress.update(batch_task, advance=1, loss=current_loss)
 
     progress.stop_task(batch_task)
     progress.remove_task(batch_task)
@@ -186,7 +191,6 @@ def validate_epoch(
     test_loader: DataLoader,
     model_type: ModelType,
     data_type: DatasetType,
-    epoch: int,
     criterion: nn.modules.loss._Loss,
     progress: Progress,
     epoch_task: TaskID,
@@ -198,7 +202,7 @@ def validate_epoch(
 
     num_batches = len(test_loader)
     batch_task = progress.add_task(
-        "[blue]Validation Mini-batches...", total=num_batches
+        "[blue]Validation Mini-batches...", total=num_batches, loss=float("nan")
     )
     epoch_loss = 0.0
     progress.console.print("start testing")
@@ -260,16 +264,15 @@ def validate_epoch(
                 raise NotImplementedError(
                     f"Combination of {model_type}, {data_type} not implemented!"
                 )
-        progress.advance(batch_task)
 
         loss = criterion(output, label)
         current_loss = loss.detach().cpu().item()
         epoch_loss += current_loss
-        progress.console.print(f"Epoch: {epoch + 1}, Batch: {i}, Loss: {current_loss}")
 
         output_test.append(output.detach().cpu())
         label_test.append(label.detach().cpu())
-        progress.advance(epoch_task, num_samples)
+        progress.update(batch_task, advance=1, loss=current_loss)
+        progress.update(epoch_task, advance=num_samples)
 
     progress.stop_task(batch_task)
     progress.remove_task(batch_task)
@@ -289,7 +292,10 @@ def test(
     model_name_list: list[str],
 ):
     with Progress(
-        SpinnerColumn(), *Progress.get_default_columns(), TimeElapsedColumn()
+        SpinnerColumn(),
+        *Progress.get_default_columns(),
+        TimeElapsedColumn(),
+        MofNCompleteColumn(),
     ) as progress:
         output_test = []
         label_test = []
@@ -409,7 +415,11 @@ def train_and_validate(
 
     # training loop
     with Progress(
-        SpinnerColumn(), *Progress.get_default_columns(), TimeElapsedColumn()
+        SpinnerColumn(),
+        *Progress.get_default_columns(),
+        TimeElapsedColumn(),
+        MofNCompleteColumn(),
+        TextColumn("Loss: {task.fields[loss]:0.4f}"),
     ) as progress:
         batch_size = train_loader.batch_size if train_loader.batch_size else 16
         total_train_samples = (
@@ -423,7 +433,9 @@ def train_and_validate(
         )
         total_samples = total_train_samples + total_test_samples
 
-        epoch_task = progress.add_task("[green]Total samples", total=total_samples)
+        epoch_task = progress.add_task(
+            "[green]Total samples", total=total_samples, loss=float("nan")
+        )
         for epoch in range(num_epochs):
             # start training
             progress.console.print("start training")
@@ -438,15 +450,11 @@ def train_and_validate(
                 optimizer,
                 criterion,
                 scaler,
-                epoch,
                 progress,
                 epoch_task,
             )
 
             avg_epoch_loss = epoch_loss / num_batches
-            progress.console.print(
-                f"Number of epoch completed: {epoch + 1}, Epoch Loss: {avg_epoch_loss}"
-            )
 
             scheduler.step()
 
@@ -455,7 +463,6 @@ def train_and_validate(
                 test_loader,
                 model_type,
                 data_type,
-                epoch,
                 criterion,
                 progress,
                 epoch_task,
@@ -480,7 +487,7 @@ def train_and_validate(
             if auroc > best_auroc:
                 best_auroc = auroc
                 best_model = copy.deepcopy(model.state_dict())
-            progress.advance(epoch_task, 1)
+            progress.update(epoch_task, loss=avg_epoch_loss)
 
     return best_model
 
@@ -793,8 +800,7 @@ def main(
 
     table = Table(title=f"{model_type_detailed} metrics")
     table.add_column("AUROC", justify="right", style="cyan", no_wrap=True)
-    table.add_column("AURPC", justify="right", style="cyan", no_wrap=True)
-    table.add_column("AURPC", justify="right", style="cyan", no_wrap=True)
+    table.add_column("AUPRC", justify="right", style="cyan", no_wrap=True)
     accuracy = 0
 
     # calculate accuracy
@@ -812,6 +818,7 @@ def main(
         # )
         table.add_column("Accuracy", justify="right", style="cyan", no_wrap=True)
         table.add_column("PPV", justify="right", style="cyan", no_wrap=True)
+        table.add_column("F1", justify="right", style="cyan", no_wrap=True)
 
         ### saving results
         df_test_acc = pd.DataFrame({"Testing Acc": [count / label_test.size(dim=0)]})
@@ -821,6 +828,7 @@ def main(
     else:
         table.add_column("PPV", justify="right", style="cyan", no_wrap=True)
         table.add_column("Recall", justify="right", style="cyan", no_wrap=True)
+        table.add_column("F1", justify="right", style="cyan", no_wrap=True)
 
     _auroc_score, _ap_score, prec_score, rec_score, f1 = data_type.get_eval_fn()
     precision = prec_score(label_test, output_thresholded)
@@ -847,11 +855,14 @@ def main(
     CONSOLE.print(table)
 
     ### saving results
-    df_test_acc = pd.DataFrame({"Testing Pre": [precision]})
-    df_test_acc.to_csv(os.path.join(result_path, "Testing_best_Pre.csv"), index=False)
+    df_test_pre = pd.DataFrame({"Testing Pre": [precision]})
+    df_test_pre.to_csv(os.path.join(result_path, "Testing_best_Pre.csv"), index=False)
 
-    df_test_acc = pd.DataFrame({"Testing recall": [recall]})
-    df_test_acc.to_csv(os.path.join(result_path, "Testing_best_Rec.csv"), index=False)
+    df_test_rec = pd.DataFrame({"Testing recall": [recall]})
+    df_test_rec.to_csv(os.path.join(result_path, "Testing_best_Rec.csv"), index=False)
+
+    df_test_f1 = pd.DataFrame({"Testing F1": [f1_score]})
+    df_test_f1.to_csv(os.path.join(result_path, "Testing_best_F1.csv"), index=False)
 
     if show_auc_plots:
         model_str = (

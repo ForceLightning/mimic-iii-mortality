@@ -131,7 +131,7 @@ function BioclinicalBERT_Embeddings_TCN() {
 function BioclinicalBERT_Embeddings_TCN_MIMIC_IV() {
   echo "Bioclinical_BERT embeddings w/ TCN + EHR seed $1 (MIMIC-IV)"
   TOKENIZERS_PARALLELISM=true uv run --env-file .env -- python -m Main_modality_model \
-    --model_type TCN \
+    --model_type BERT_EMB_EHR_TCN \
     --data_type BCB_EMB_EHR \
     --data_dir ./data-mimic-iv/ \
     --checkpoints_dir ./checkpoints-mimic-iv/ \
@@ -232,9 +232,9 @@ function loop_3407_3409_params() {
 # TODO: Run these
 #
 loop_3407_3409_params BERT_custom_model_MIMIC_IV "dmis-lab/biobert-v1.1"
-# loop_3407_3409_params BERT_custom_model_MIMIC_IV "emilyalsentzer/Bio_ClinicalBERT"
-# loop_3407_3409 BERT_EHR_MIMIC_IV
-# loop_3407_3409 BioclinicalBERT_Embeddings_TCN_MIMIC_IV
+loop_3407_3409_params BERT_custom_model_MIMIC_IV "emilyalsentzer/Bio_ClinicalBERT"
+loop_3407_3409 BERT_EHR_MIMIC_IV
+loop_3407_3409 BioclinicalBERT_Embeddings_TCN_MIMIC_IV
 
 # Maybe run these?
 # loop_3407_3409 BioclinicalBERT_Embeddings_MIMIC_IV

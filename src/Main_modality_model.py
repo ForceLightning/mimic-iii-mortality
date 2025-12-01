@@ -105,7 +105,11 @@ def train_epoch(
         ehr: Tensor
         report: Tensor | list[str]
         label: Tensor
-        num_samples: int = data_tuple[-1].shape[0]
+        num_samples: int
+        try:
+            num_samples = data_tuple[-1].shape[0]
+        except AttributeError:
+            num_samples = data_tuple[0].shape[0]
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             match (model_type, data_type):
@@ -681,7 +685,6 @@ def main(
             model_name_list = [model_type_detailed]
 
         case ModelType.BERT_EHR, EHRAndReportDataset():
-            print(model_type, train_dataset[0][0].shape)
             model_sequential = BERT_EHR(
                 train_dataset[0][0].shape[-1],
                 trans_dropout,

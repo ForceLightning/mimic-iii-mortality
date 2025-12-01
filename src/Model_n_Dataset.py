@@ -239,6 +239,7 @@ class EHRAndReportDataset(Dataset[tuple[Tensor, str, Tensor, str]]):
             else:
                 reports = report_df["Note"].drop_duplicates().to_list()
             reports = self.__remove_spaces_from_report(reports)
+
         reports = " [SEP] ".join(reports)
         text = "[CLS] " + reports
 
@@ -301,9 +302,7 @@ class EHRAndBioclinicalBERTEmbeddingsDataset(Dataset[tuple[Tensor, Tensor, Tenso
         )
         ehr_tensor = torch.tensor(ehr_df.values, dtype=torch.float32)
 
-        label = torch.tensor(
-            self.labels.iloc[index].values, dtype=torch.float32
-        ).squeeze()
+        label = torch.tensor(self.labels.iloc[index], dtype=torch.float32).squeeze()
 
         return ehr_tensor, emb_tensor, label
 

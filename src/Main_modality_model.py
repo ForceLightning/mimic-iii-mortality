@@ -211,7 +211,11 @@ def validate_epoch(
     epoch_loss = 0.0
     progress.console.print("start testing")
     for i, data_tuple in enumerate(test_loader):
-        num_samples: int = data_tuple[-1].shape[0]
+        num_samples: int
+        try:
+            num_samples = data_tuple[-1].shape[0]
+        except AttributeError:
+            num_samples = data_tuple[0].shape[0]
         match (model_type, data_type):
             case (
                 ModelType.RNN | ModelType.LSTM | ModelType.TRANSFORMER | ModelType.BERT,

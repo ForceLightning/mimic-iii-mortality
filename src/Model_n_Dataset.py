@@ -5,6 +5,7 @@ from functools import partial
 from typing import Literal, override
 
 # Scientific Libraries
+import numpy as np
 import pandas as pd
 from sklearn.metrics import (
     average_precision_score,
@@ -13,6 +14,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
+from sklearn.utils.class_weight import compute_class_weight
 
 # PyTorch
 import torch
@@ -31,6 +33,7 @@ class DatasetType(Enum):
     BCB_EMB_EHR = auto()
     PHENOTYPE_BCB_EMB = auto()
     PHENOTYPE_BCB_EMB_EHR = auto()
+    EVID_EMB_EHR = auto()
 
     def get_train_test_dir(self) -> tuple[str, str]:
         match self:
@@ -40,6 +43,7 @@ class DatasetType(Enum):
                 | DatasetType.EHR_AND_REPORT
                 | DatasetType.BCB_EMB_EHR
                 | DatasetType.BCB_EMB
+                | DatasetType.EVID_EMB_EHR
             ):
                 return "train_with_raw_report", "test_with_raw_report"
             case DatasetType.PHENOTYPE_BCB_EMB | DatasetType.PHENOTYPE_BCB_EMB_EHR:
@@ -60,6 +64,8 @@ class DatasetType(Enum):
                 return BioclinicalBERTEmbeddingsDataset
             case DatasetType.BCB_EMB_EHR | DatasetType.PHENOTYPE_BCB_EMB_EHR:
                 return EHRAndBioclinicalBERTEmbeddingsDataset
+            case DatasetType.EVID_EMB_EHR:
+                return EVIDEHRAndBioclinalBERTEmbeddingsDataset
 
     def get_eval_fn(self):
         match self:
@@ -69,6 +75,7 @@ class DatasetType(Enum):
                 | DatasetType.EHR_AND_REPORT
                 | DatasetType.BCB_EMB
                 | DatasetType.BCB_EMB_EHR
+                | DatasetType.EVID_EMB_EHR
             ):
                 return (
                     roc_auc_score,
@@ -99,6 +106,7 @@ class ModelType(Enum):
     BERT_EMB = auto()
     BERT_EHR = auto()
     BERT_EMB_EHR_TCN = auto()
+    ENN_EHR = auto()
 
     def __str__(self) -> str:
         return str(self.name)
@@ -261,7 +269,7 @@ class EHRAndReportDataset(Dataset[tuple[Tensor, str, Tensor, str]]):
 
 
 class EHRAndBioclinicalBERTEmbeddingsDataset(Dataset[tuple[Tensor, Tensor, Tensor]]):
-    def __init__(self, root_dir: str) -> None:
+    def __init__(self, root_dir: str, keep_label_as_long_tensor: bool = False) -> None:
         super().__init__()
         self.ehr_dir = os.path.join(root_dir, "EHR")
         self.emb_dir = os.path.join(
@@ -276,6 +284,7 @@ class EHRAndBioclinicalBERTEmbeddingsDataset(Dataset[tuple[Tensor, Tensor, Tenso
         else:
             self.labels = self.labels_df["y_true"].astype(int)
         self.num_classes = self.labels.iloc[0].size
+        self.keep_label_as_long_tensor = keep_label_as_long_tensor
 
     def __len__(self) -> int:
         return len(self.labels_df)
@@ -302,7 +311,10 @@ class EHRAndBioclinicalBERTEmbeddingsDataset(Dataset[tuple[Tensor, Tensor, Tenso
         )
         ehr_tensor = torch.tensor(ehr_df.values, dtype=torch.float32)
 
-        label = torch.tensor(self.labels.iloc[index], dtype=torch.float32).squeeze()
+        if self.keep_label_as_long_tensor:
+            label = torch.tensor(self.labels.iloc[index], dtype=torch.long).squeeze()
+        else:
+            label = torch.tensor(self.labels.iloc[index], dtype=torch.float32).squeeze()
 
         return ehr_tensor, emb_tensor, label
 
@@ -341,6 +353,66 @@ class BioclinicalBERTEmbeddingsDataset(Dataset[tuple[Tensor, Tensor]]):
         ).squeeze()
 
         return emb_tensor, label
+
+
+class EVIDEHRAndBioclinalBERTEmbeddingsDataset(Dataset[tuple[Tensor, Tensor, Tensor]]):
+    def __init__(self, root_dir: str, keep_label_as_long_tensor: bool = False) -> None:
+        super().__init__()
+        self.ehr_dir = os.path.join(root_dir, "EHR")
+        self.emb_dir = os.path.join(
+            root_dir, "Embeddings" if "phenotyping" not in root_dir else "Report"
+        )
+
+        label_path = os.path.join(root_dir, "labels.csv")
+        self.labels_df = pd.read_csv(label_path, index_col=False)
+        self.stay_ids = self.labels_df["stay"].astype(str)
+        if "phenotyping" in root_dir:
+            self.labels = self.labels_df.iloc[:, 2:].astype(int)
+        else:
+            self.labels = self.labels_df["y_true"].astype(int)
+        self.num_classes = self.labels.iloc[0].size
+        self.keep_label_as_long_tensor = keep_label_as_long_tensor
+
+    def __len__(self) -> int:
+        return len(self.labels_df)
+
+    @override
+    def __getitem__(self, index) -> tuple[Tensor, Tensor, Tensor]:
+        stay_id: str = self.stay_ids[index]  # pyright: ignore
+
+        # Get report embeddings.
+        emb_path = os.path.join(self.emb_dir, stay_id)
+        emb_df = (
+            pd.read_csv(emb_path, index_col=False, encoding="utf-8")
+            .apply(pd.to_numeric, errors="coerce")
+            .ffill()
+        )
+        ## Take only the first value.
+        emb_tensor = torch.tensor(emb_df.values, dtype=torch.float32)[0, ...]
+
+        # Get EHR data.
+        ehr_path = os.path.join(self.ehr_dir, stay_id)
+        ehr_df = (
+            pd.read_csv(ehr_path, index_col=False, encoding="utf-8")
+            .apply(pd.to_numeric, errors="coerce")
+            .ffill()
+        )
+        ## Take only the first value recorded.
+        ehr_tensor = torch.tensor(ehr_df.values, dtype=torch.float32)[0, ...]
+
+        if self.keep_label_as_long_tensor:
+            label = torch.tensor(self.labels.iloc[index], dtype=torch.long).squeeze()
+        else:
+            label = torch.tensor(self.labels.iloc[index], dtype=torch.float32).squeeze()
+
+        return ehr_tensor, emb_tensor, label
+
+    @property
+    def class_weights(self):
+        class_weights = compute_class_weight(
+            class_weight="balanced", classes=np.unique(self.labels), y=self.labels
+        ).tolist()
+        return class_weights
 
 
 # define 1 linear layer class

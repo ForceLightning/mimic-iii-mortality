@@ -34,3 +34,7 @@ torchvision = [
 wsl = [
     "pyqt6>=6.9.1",
 ]
+thirdparty-evid = [
+    "peft>=0.19.1",
+    "rtdl-revisiting-models>=0.0.2",
+]

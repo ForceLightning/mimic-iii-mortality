@@ -22,7 +22,7 @@ from rich.table import Table
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
-from sklearn.metrics import roc_curve
+from sklearn.metrics import confusion_matrix, roc_curve
 
 # PyTorch
 import torch
@@ -32,6 +32,12 @@ from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
 
 # First party imports
+from evid_multimodal_ehr import (
+    HParamsDict,
+    MLPENNOneStructured,
+    MultitaskLoss4OneStructured,
+)
+from evid_multimodal_ehr.utils import count_parameters
 from Model_n_Dataset import (
     BERT,
     BERT_EHR,
@@ -46,6 +52,7 @@ from Model_n_Dataset import (
     EHRAndBioclinicalBERTEmbeddingsDataset,
     EHRAndReportDataset,
     EHRDataset,
+    EVIDEHRAndBioclinalBERTEmbeddingsDataset,
     Model_head_1_layer,
     Model_head_3_layers,
     Model_linear_1_layer,
@@ -58,7 +65,7 @@ SEED_CUS = 3407
 CONSOLE = Console()
 
 
-def set_seed(seed_cus):
+def set_seed(seed_cus: int):
     random.seed(seed_cus)
     np.random.seed(seed_cus)
     torch.manual_seed(seed_cus)
@@ -66,7 +73,7 @@ def set_seed(seed_cus):
     torch.cuda.manual_seed_all(seed_cus)
 
 
-def worker_init_fn(worker_id):
+def worker_init_fn(worker_id: int):
     seed = SEED_CUS  # Or any constant
     np.random.seed(seed + worker_id)
     random.seed(seed + worker_id)
@@ -80,6 +87,31 @@ g.manual_seed(SEED_CUS)
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 DATA_DIR = "./data/"
 CHECKPOINTS_DIR = "./checkpoints/"
+
+ENN_DEFAULT_HPARAMS: HParamsDict = {
+    "seed": 10,
+    "logger": False,
+    "devices": "cuda:0",
+    "batch_size": 32,
+    "lr": 1e-4,
+    "max_epochs": 100,
+    "comments": "",
+    "outcome": "long_icu",
+    "n_class": 2,
+    "data_path": "./data/datasets/mimic/processed",
+    "structured_d_in_ls": [76],
+    "class_weight": None,
+    "cv_split": 0,
+    "model": "mlp_enn_one_structured",
+    "pretrained_model": "emilyalsentzer/Bio_ClinicalBERT",
+    "prototype_dim": 20,
+    "n_blocks": 3,
+    "structured_d_hidden": 32,
+    "notes_d_hidden": 128,
+    "alpha1": 2,
+    "alpha2": 1,
+    "dropout": 0.1,
+}
 
 
 def train_epoch(
@@ -99,7 +131,7 @@ def train_epoch(
         "[blue]Training Mini-batches...", total=num_batches, loss=float("nan")
     )
     model.train()
-    for i, data_tuple in enumerate(train_loader):
+    for _i, data_tuple in enumerate(train_loader):
         optimizer.zero_grad()
 
         ehr: Tensor
@@ -127,7 +159,7 @@ def train_epoch(
 
                     output = model(data)
 
-                case (ModelType.BERT_EHR, DatasetType.EHR_AND_REPORT):
+                case ModelType.BERT_EHR, DatasetType.EHR_AND_REPORT:
                     ehr, report, label, _stay_id = data_tuple
                     ehr = ehr.to(DEVICE)
                     if isinstance(report, Tensor):
@@ -166,6 +198,14 @@ def train_epoch(
                     label = label.to(DEVICE)
 
                     output = model(ehr, emb)
+
+                case ModelType.ENN_EHR, DatasetType.EVID_EMB_EHR:
+                    ehr, emb, label = data_tuple
+                    ehr = ehr.to(DEVICE)
+                    emb = emb.to(DEVICE)
+                    label = label.to(DEVICE).unsqueeze(1)
+
+                    output = model(ehr, emb)[:-1]
 
                 case _, _:
                     raise NotImplementedError(
@@ -210,7 +250,7 @@ def validate_epoch(
     )
     epoch_loss = 0.0
     progress.console.print("start testing")
-    for i, data_tuple in enumerate(test_loader):
+    for _i, data_tuple in enumerate(test_loader):
         num_samples: int
         try:
             num_samples = data_tuple[-1].shape[0]
@@ -228,7 +268,7 @@ def validate_epoch(
 
                 output = model(data)
 
-            case (ModelType.BERT_EHR, DatasetType.EHR_AND_REPORT):
+            case ModelType.BERT_EHR, DatasetType.EHR_AND_REPORT:
                 ehr, report, label, _stay_id = data_tuple
                 ehr = ehr.to(DEVICE)
                 if isinstance(report, Tensor):
@@ -268,6 +308,13 @@ def validate_epoch(
 
                 output = model(ehr, emb)
 
+            case ModelType.ENN_EHR, DatasetType.EVID_EMB_EHR:
+                ehr, emb, label = data_tuple
+                ehr = ehr.to(DEVICE)
+                emb = emb.to(DEVICE)
+                label = label.to(DEVICE).unsqueeze(1)
+
+                output = model(ehr, emb)[:-1]
             case _, _:
                 raise NotImplementedError(
                     f"Combination of {model_type}, {data_type} not implemented!"
@@ -276,8 +323,11 @@ def validate_epoch(
         loss = criterion(output, label)
         current_loss = loss.detach().cpu().item()
         epoch_loss += current_loss
-
-        output_test.append(output.detach().cpu())
+        if model_type == ModelType.ENN_EHR:
+            main_probs, _structured_logits, _notes_logits = output
+            output_test.append(main_probs[..., 1:].detach().cpu())
+        else:
+            output_test.append(output.detach().cpu())
         label_test.append(label.detach().cpu())
         progress.update(batch_task, advance=1, loss=current_loss)
         progress.update(epoch_task, advance=num_samples)
@@ -335,7 +385,7 @@ def test(
 
                     output = model(data)
 
-                case (ModelType.BERT_EHR, DatasetType.EHR_AND_REPORT):
+                case ModelType.BERT_EHR, DatasetType.EHR_AND_REPORT:
                     ehr, report, label, _stay_id = data_tuple
                     ehr = ehr.to(DEVICE)
                     if isinstance(report, Tensor):
@@ -375,13 +425,25 @@ def test(
 
                     output = model(ehr, emb)
 
+                case ModelType.ENN_EHR, DatasetType.EVID_EMB_EHR:
+                    ehr, emb, label = data_tuple
+                    ehr = ehr.to(DEVICE)
+                    emb = emb.to(DEVICE)
+                    label = label.to(DEVICE).unsqueeze(1)
+
+                    output = model(ehr, emb)[:-1]
+
                 case _, _:
                     raise NotImplementedError(
                         f"Combination of {model_type}, {data_type} not implemented!"
                     )
 
             # append all outputs
-            output_test.append(output.detach().cpu())
+            if model_type == ModelType.ENN_EHR:
+                main_probs, _structured_logits, _notes_logits = output
+                output_test.append(main_probs[..., 1:].detach().cpu())
+            else:
+                output_test.append(output.detach().cpu())
 
             # append all labels
             label_test.append(label.detach().cpu())
@@ -538,9 +600,20 @@ def main(
         "dmis-lab/biobert-v1.1",
         "emilyalsentzer/Bio_ClinicalBERT",
     ] = "google-bert/bert-base-uncased",
+    enn_prototype_dim: int = 20,
+    enn_n_blocks: int = 3,
+    enn_structured_d_hidden: int = 32,
+    enn_notes_d_hidden: int = 128,
+    enn_alpha1: int | float = 2,
+    enn_alpha2: int | float = 1,
+    enn_dropout: float = 0.1,
+    enn_structured_d_in_ls: list[int] | None = None,
     seed_everything: int = SEED_CUS,
     show_auc_plots: bool = False,
+    show_confusion_matrix: bool = False,
 ):
+    if enn_structured_d_in_ls is None and model_type == ModelType.ENN_EHR:
+        enn_structured_d_in_ls = [12, 64]
     set_seed(seed_everything)
     # define train and test dataset
 
@@ -550,8 +623,22 @@ def main(
 
     train_dir, test_dir = data_type.get_train_test_dir()
 
-    train_dataset = Dataset(os.path.join(data_dir, train_dir))
-    test_dataset = Dataset(os.path.join(data_dir, test_dir))
+    train_dataset = None
+    test_dataset = None
+
+    if (
+        model_type is ModelType.ENN_EHR
+        and Dataset is EVIDEHRAndBioclinalBERTEmbeddingsDataset
+    ):
+        train_dataset = Dataset(
+            os.path.join(data_dir, train_dir), keep_label_as_long_tensor=True
+        )
+        test_dataset = Dataset(
+            os.path.join(data_dir, test_dir), keep_label_as_long_tensor=True
+        )
+    else:
+        train_dataset = Dataset(os.path.join(data_dir, train_dir))
+        test_dataset = Dataset(os.path.join(data_dir, test_dir))
 
     num_classes = train_dataset.num_classes
 
@@ -567,6 +654,7 @@ def main(
                 DatasetType.BCB_EMB_EHR,
                 DatasetType.PHENOTYPE_BCB_EMB,
                 DatasetType.PHENOTYPE_BCB_EMB_EHR,
+                DatasetType.EVID_EMB_EHR,
             ]
             else 8
         ),
@@ -585,6 +673,7 @@ def main(
                 DatasetType.BCB_EMB_EHR,
                 DatasetType.PHENOTYPE_BCB_EMB,
                 DatasetType.PHENOTYPE_BCB_EMB_EHR,
+                DatasetType.EVID_EMB_EHR,
             ]
             else 8
         ),
@@ -619,9 +708,6 @@ def main(
         CONSOLE.print(
             f"The new result directory is created: {os.path.normpath(result_path)}"
         )
-
-    # set criterion
-    criterion = nn.BCEWithLogitsLoss()
 
     # define models
     model_sequential: nn.Module
@@ -731,13 +817,44 @@ def main(
             )
             model_name_list = [model_type_detailed]
 
+        case ModelType.ENN_EHR, EVIDEHRAndBioclinalBERTEmbeddingsDataset():
+            enn_num_classes = num_classes if num_classes > 1 else 2
+            model_sequential = MLPENNOneStructured(
+                pretrained_model=bert_model_str,
+                prototype_dim=enn_prototype_dim,
+                n_blocks=enn_n_blocks,
+                structured_d_hidden=enn_structured_d_hidden,
+                notes_d_hidden=enn_notes_d_hidden,
+                alpha1=enn_alpha1,
+                alpha2=enn_alpha2,
+                dropout=enn_dropout,
+                structured_d_in_ls=enn_structured_d_in_ls,
+                n_class=enn_num_classes,
+            )
+            model_name_list = [model_type_detailed]
+
         case _, _:
             raise NotImplementedError(
                 f"Combination of {model_type}, {data_type} is not implemented!"
             )
 
+    count_parameters(model_sequential)
     model_sequential.to(DEVICE)
     ckpt_path = os.path.join(model_path, f"{"_".join(model_name_list)}.ckpt")
+
+    # set criterion
+    criterion = None
+    if model_type is ModelType.ENN_EHR and isinstance(
+        train_dataset, EVIDEHRAndBioclinalBERTEmbeddingsDataset
+    ):
+        print(f"class weights: {train_dataset.class_weights}")
+        criterion = MultitaskLoss4OneStructured(
+            enn_alpha1,
+            enn_alpha2,
+            weight=torch.tensor(train_dataset.class_weights).to(DEVICE),
+        )
+    else:
+        criterion = nn.BCEWithLogitsLoss()
 
     if not os.path.exists(ckpt_path):
         params = [
@@ -882,6 +999,16 @@ def main(
             f"./output/{model_str}.png",
         )
         plt.show(block=True)
+
+    if show_confusion_matrix:
+        conf_mat = confusion_matrix(label_test, output_thresholded)
+        columns = ["True\\Predicted"] + [str(i) for i in range(conf_mat.shape[0])]
+        conf_mat_table = Table(*columns, title="Confusion Matrix")
+        for class_idx in range(conf_mat.shape[0]):
+            row = [f"{class_idx}"] + [str(i) for i in conf_mat[class_idx]]
+            conf_mat_table.add_row(*row)
+
+        CONSOLE.print(conf_mat_table)
 
 
 if __name__ == "__main__":

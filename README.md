@@ -33,8 +33,8 @@ The main command is as follows:
 TOKENIZERS_PARALLELISM=true uv run --env-file .env -- python -m Main_modality_model ...
 ```
 with the following arguments:
-- `model_type` (str/Enum) \[Mandatory\]: `RNN`, `LSTM`, `TRANSFORMER`, `BERT`, `BERT_EMB`, `BERT_EHR`, or `BERT_EMB_EHR_TCN`.
-- `data_type` (str/Enum) \[Mandatory\]: `EHR`, `REPORT`, `EHR_AND_REPORT`, `BCB_EMB`, `BCB_EMB_EHR`, `PHENOTYPE_BCB_EMB`, `PHENOTYPE_BCB_EMB_EHR`.
+- `model_type` (str/Enum) \[Mandatory\]: `RNN`, `LSTM`, `TRANSFORMER`, `BERT`, `BERT_EMB`, `BERT_EHR`, `BERT_EMB_EHR_TCN`, or `ENN_EHR`.
+- `data_type` (str/Enum) \[Mandatory\]: `EHR`, `REPORT`, `EHR_AND_REPORT`, `BCB_EMB`, `BCB_EMB_EHR`, `PHENOTYPE_BCB_EMB`, `PHENOTYPE_BCB_EMB_EHR` or `EVID_EMB_EHR`.
 - `data_dir` (str): Directory to train/val/test data.
 - `checkpoints_dir` (str): Directory to save model checkpoints to.
 - `batch_size` (int): Minibatch size.
@@ -55,5 +55,16 @@ with the following arguments:
 - `bert_model_str` (str): BERT model definition name from Huggingface.
 - `seed_everything` (int): Global seed for RNG.
 - `show_auc_plots` (bool): Whether to show the AUROC/AUPRC.
+- `show_confusion_matrix` (bool): Whether to show the classification confusion matrix after testing.
 
-See [train.sh](./train.sh) for an example of how the arguments may be used.
+## Third party parameters
+- `enn_prototype_dim` (int): Number of prototypes $H$ in input layer.
+- `enn_n_blocks` (int): Number of blocks in MLP layer.
+- `enn_structured_d_hidden` (int): Size of hidden layer for EHR features before classification.
+- `enn_notes_d_hidden` (int): Size of hidden layer for textual embedding features before classification.
+- `enn_alpha1` (float): Scaling factor of the 1st auxiliary loss.
+- `enn_alpha2` (float): Scaling factor of the 2nd auxiliary loss.
+- `enn_dropout` (float): Dropout factor for ENN.
+- `enn_structured_d_in_ls` (list\[int\]): Sizes of categorical and continuous features in the EHR data.
+
+See [train.sh](./train.sh ) for an example of how the arguments may be used.

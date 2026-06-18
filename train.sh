@@ -203,6 +203,19 @@ function phenotyping_BERT_EHR_MIMIC_IV() {
     --seed_everything $1
 }
 
+function ENN_EHR_MIMIC_IV() {
+  echo "ENN EHR seed $1 (MIMIC-IV)"
+  TOKENIZERS_PARALLELISM=true uv run --env-file .env -- python -m Main_modality_model \
+    --model_type ENN_EHR \
+    --data_type EVID_EMB_EHR \
+    --data_dir ./data-mimic-iv/ \
+    --checkpoints_dir ./checkpoints-mimic-iv/ \
+    --batch_size 16 \
+    --num_epoch 10 \
+    --lr 3e-4 \
+    --seed_everything $1
+}
+
 function loop_3407_3409() {
   for seed in {3407..3409}; do
     $1 $seed
@@ -218,12 +231,10 @@ function loop_3407_3409_params() {
 # loop_3407_3409_params BERT_custom_model "google-bert/bert-base-uncased"
 # loop_3407_3409_params BERT_custom_model "dmis-lab/biobert-v1.1"
 # loop_3407_3409_params BERT_custom_model "emilyalsentzer/Bio_ClinicalBERT"
-#
 # loop_3407_3409 BERT_EHR
 
 # BERT_EHR 3408
 # loop_3407_3409 BioclinicalBERT_Embeddings_TCN
-
 # loop_3407_3409 phenotyping_BERT
 # loop_3407_3409 phenotyping_BERT_EHR
 
@@ -232,3 +243,6 @@ function loop_3407_3409_params() {
 # loop_3407_3409_params BERT_custom_model_MIMIC_IV "dmis-lab/biobert-v1.1"
 # loop_3407_3409_params BERT_custom_model_MIMIC_IV "emilyalsentzer/Bio_ClinicalBERT"
 # loop_3407_3409 BioclinicalBERT_Embeddings_TCN_MIMIC_IV
+
+# ENN_EHR
+# loop_3407_3409 ENN_EHR_MIMIC_IV 

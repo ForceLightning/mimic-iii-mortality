@@ -19,6 +19,54 @@ uv add -r requirements.txt
 # or
 uv sync
 ```
+3. Ensure that the data directory structure is as follows:
+```sh
+.
+├── data                        # mimic-iii
+│   ├── test_with_raw_report
+│   |   ├── EHR                 #   EHR features as .csv files
+│   |   ├── Embeddings          #   Bioclinical_BERT embeddings as .csv files
+│   |   ├── Report              #   Hourly clinical reports as .csv files
+|   |   └── labels.csv          #   mapping of filename → label outcome
+│   ├── train_with_raw_report       
+│   |   ├── EHR                 #   EHR features as .csv files
+│   |   ├── Embeddings          #   Bioclinical_BERT embeddings as .csv files
+│   |   ├── Report              #   Hourly clinical reports as .csv files
+|   |   └── labels.csv          #   mapping of filename → label outcome
+│   ├── val_with_raw_report         
+│   |   ├── EHR                 #   EHR features as .csv files
+│   |   ├── Embeddings          #   Bioclinical_BERT embeddings as .csv files
+│   |   ├── Report              #   Hourly clinical reports as .csv files
+|   |   └── labels.csv          #   mapping of filename → label outcome
+│   └── phenotyping_first_48_hour   
+|       ├── train                   
+|       |   ├── EHR             #   EHR features as .csv files
+|       |   ├── Report          #   Bioclinical_BERT embeddings as .csv files
+|       |   └── labels.csv      #   mapping of filename → label outcome
+|       ├── test
+|       |   ├── EHR             #   EHR features as .csv files
+|       |   ├── Report          #   Bioclinical_BERT embeddings as .csv files
+|       |   └── labels.csv      #   mapping of filename → label outcome
+|       └── val
+|           ├── EHR             #   EHR features as .csv files
+|           ├── Report          #   Bioclinical_BERT embeddings as .csv files
+|           └── labels.csv      #   mapping of filename → label outcome
+└── data-mimic-iv               # mimic-iv
+    ├── test_with_raw_report
+    |   ├── EHR                 #   EHR features as .csv files
+    |   ├── Embeddings          #   Bioclinical_BERT embeddings as .csv files
+    |   ├── Report              #   .txt files of clinical notes
+    |   └── labels.csv          #   mapping of filename → label outcome
+    └── train_with_raw_report
+        ├── EHR
+        ├── Embeddings
+    |   ├── Report              #   .txt files of clinical notes
+        └── labels.csv          #   mapping of filename → label outcome
+
+
+
+```
+
 # Usage
 > !NOTE
 > Ensure that the environment variable `PYTHONPATH` is set to `./src/`.
@@ -56,6 +104,19 @@ with the following arguments:
 - `seed_everything` (int): Global seed for RNG.
 - `show_auc_plots` (bool): Whether to show the AUROC/AUPRC.
 - `show_confusion_matrix` (bool): Whether to show the classification confusion matrix after testing.
+
+> !NOTE
+> The `model_type` and `data_type` compatibility matrix is as follows:
+> |  | RNN | LSTM | TRANSFORMER | BERT | BERT_EMB | BERT_EHR | BERT_EMB_EHR_TCN | ENN_EHR |
+> |---|---|---|---|---|---|---|---|---|
+> | EHR | ✓ | ✓ | ✓ | ✓ |  |  |  |  |
+> | REPORT | ✓ | ✓ | ✓ | ✓ |  |  |  |  |
+> | BCB_EMB |  |  |  |  | ✓ |  |  |  |
+> | PHENOTYPE_BCB_EMB (MIMIC-III only) |  |  |  |  | ✓ |  |  |  |
+> | EHR_AND_REPORT |  |  |  |  |  | ✓ |  |  |
+> | PHENOTYPE_BCB_EMB_EHR (MIMIC-III only) |  |  |  |  |  | ✓ |  |  |
+> | BCB_EMB_EHR |  |  |  |  |  |  | ✓ |  |
+> | EVID_EMB_EHR |  |  |  |  |  |  |  | ✓ |
 
 ## Third party parameters
 - `enn_prototype_dim` (int): Number of prototypes $H$ in input layer.
